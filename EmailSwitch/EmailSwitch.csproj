@@ -3,16 +3,16 @@
   <PropertyGroup>
 	  <PackageLicenseFile>LICENSE</PackageLicenseFile>
 	  <PackageReadmeFile>README.md</PackageReadmeFile>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
 	<ItemGroup>
-		<PackageReference Include="HumanLanguages" Version="10.0.0" />
+		<PackageReference Include="HumanLanguages" Version="10.2.0" />
 		<PackageReference Include="SendGrid" Version="9.29.3" />
-		<PackageReference Include="SMSwitch" Version="8.1.0" />
-		<PackageReference Include="MongoDbTokenManager" Version="5.0.0" />
-		<PackageReference Include="uSignIn.CommonSettings" Version="4.0.0" />
+		<PackageReference Include="SMSwitch" Version="10.1.0" />
+		<PackageReference Include="MongoDbTokenManager" Version="10.0.0" />
+		<PackageReference Include="uSignIn.CommonSettings" Version="10.0.1" />
 	</ItemGroup>
 	<ItemGroup>
 		<None Include="../LICENSE" Pack="true" PackagePath="\" />
