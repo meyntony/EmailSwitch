@@ -2,7 +2,6 @@
 using EmailSwitch.Common.DTOs;
 using EmailSwitch.EmailTemplates.DTOs;
 using Microsoft.Extensions.Logging;
-using MongoDbTokenManager.Database;
 using SendGrid.Helpers.Mail;
 
 namespace EmailSwitch.Services.SendGrid
@@ -15,8 +14,7 @@ namespace EmailSwitch.Services.SendGrid
 
 		public SendGridService(
 			SendGridInitializer sendGridInitializer,
-			ILogger<SendGridService> logger,
-			MongoDbTokenService mongoDbTokenService)
+			ILogger<SendGridService> logger)
 		{
 			_sendGridInitializer = sendGridInitializer;
 			_logger = logger;

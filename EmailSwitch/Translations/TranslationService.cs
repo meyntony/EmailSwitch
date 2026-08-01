@@ -10,7 +10,9 @@ namespace EmailSwitch.Translations
 				keyTranslations.TryGetValue(languageIsoCode.LanguageId, out var translations))
 			{
 				var translation = translations.GetValueOrDefault(languageIsoCode.LanguageLocaleVariationCode);
-				return translation is null || translation.Length == 0 ? translations.GetValueOrDefault(LanguageLocaleVariationCode.Default) : translation;
+				return translation is null || translation.Length == 0
+					? translations.GetValueOrDefault(LanguageLocaleVariationCode.Default) ?? []
+					: translation;
 			}
 
 			// Handle the case where the translation is not found.

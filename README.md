@@ -25,6 +25,7 @@ Then in your `appsettings.json` add the following sample configuration and chang
 ```json
   "EmailSwitchSettings": {
   "OtpLength": 6,
+  "SignatureLogoPath": "wwwroot/logo.png",
   "Controls": {
     "MaxRoundRobinAttempts": 2,
     "Priority": [ "SendGrid" ],

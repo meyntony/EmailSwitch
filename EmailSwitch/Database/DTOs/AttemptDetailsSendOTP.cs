@@ -1,6 +1,10 @@
 ﻿using EmailSwitch.Common;
+using MongoDB.Bson.Serialization.Attributes;
 
 namespace EmailSwitch.Database.DTOs
 {
-	public record AttemptDetailsSendOTP(DateTimeOffset AttemptTimeInUTC, EmailProvider EmailProvider, bool SentSuccessfully);
+	public record AttemptDetailsSendOTP(
+		[property: BsonDateTimeOptions(Kind = DateTimeKind.Utc)] DateTime AttemptTimeInUTC,
+		EmailProvider EmailProvider,
+		bool SentSuccessfully);
 }

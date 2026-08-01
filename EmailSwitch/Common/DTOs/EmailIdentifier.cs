@@ -22,7 +22,7 @@ namespace EmailSwitch.Common.DTOs
 			if (emailId.ToLowerInvariant() != idValue) { throw new Exception($"Email ID mismatch>>{emailId} != {idValue}<<"); }
 		}
 
-		public override bool Equals(object obj)
+		public override bool Equals(object? obj)
 		{
 			if (obj is EmailIdentifier tokenIdentifier)
 			{

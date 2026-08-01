@@ -14,7 +14,7 @@ namespace EmailSwitch.Common
 				MaximumFailedAttemptsToVerify = byte.TryParse(emailControlsConfig["MaximumFailedAttemptsToVerify"], out byte maximumFailedAttemptsToVerify) ? maximumFailedAttemptsToVerify : (byte)3,
 				SessionTimeoutInSeconds = int.TryParse(emailControlsConfig["SessionTimeoutInSeconds"], out int sessionTimeoutInSeconds) ? sessionTimeoutInSeconds : 240,
 				MaxRoundRobinAttempts = byte.TryParse(emailControlsConfig["MaxRoundRobinAttempts"], out byte maxRoundRobinAttempts) ? maxRoundRobinAttempts : (byte)1,
-				Priority = getPriority(emailControlsConfig.GetRequiredSection("Priority").Get<string[]>())
+				Priority = getPriority(emailControlsConfig.GetRequiredSection("Priority").Get<string[]>() ?? [])
 			};
 		}
 

@@ -8,11 +8,19 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 	<ItemGroup>
-		<PackageReference Include="HumanLanguages" Version="10.2.0" />
+		<InternalsVisibleTo Include="EmailSwitch.Tests" />
+	</ItemGroup>
+	<ItemGroup>
+		<!-- EmailSwitch maps its own minimal-API endpoints, so it needs the ASP.NET Core
+		     framework directly rather than inheriting it transitively from SMSwitch. -->
+		<FrameworkReference Include="Microsoft.AspNetCore.App" />
+	</ItemGroup>
+	<ItemGroup>
+		<PackageReference Include="HumanLanguages" Version="11.0.0" />
 		<PackageReference Include="SendGrid" Version="9.29.3" />
-		<PackageReference Include="SMSwitch" Version="10.1.0" />
-		<PackageReference Include="MongoDbTokenManager" Version="10.0.0" />
-		<PackageReference Include="uSignIn.CommonSettings" Version="10.0.1" />
+		<PackageReference Include="SMSwitch" Version="10.3.0" />
+		<PackageReference Include="MongoDbTokenManager" Version="10.2.0" />
+		<PackageReference Include="uSignIn.CommonSettings" Version="10.2.0" />
 	</ItemGroup>
 	<ItemGroup>
 		<None Include="../LICENSE" Pack="true" PackagePath="\" />

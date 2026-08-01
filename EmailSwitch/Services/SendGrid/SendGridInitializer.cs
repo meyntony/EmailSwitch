@@ -13,31 +13,36 @@ namespace EmailSwitch.Services.SendGrid
 			IConfiguration configuration,
 			ILogger<SendGridInitializer> logger) : base(configuration, logger)
 		{
-			try
+			var sendGridConfig = EmailSwitchSettings.GetSection(EmailProvider.SendGrid.ToString());
+
+			var from = sendGridConfig["From"];
+			var apiKey = sendGridConfig["Password"];
+
+			// Missing configuration used to be logged and swallowed, which left SendGridSettings null
+			// and turned every later send into a caught NullReferenceException - so email silently
+			// never went out behind a single startup log line. Fail the startup instead.
+			var settingsPath = $"{ConstantStrings.EmailSwitchSettingsName}:{EmailProvider.SendGrid}";
+
+			if (string.IsNullOrWhiteSpace(from))
 			{
+				throw new ArgumentException($"{settingsPath}:From is missing. SendGrid cannot send without a sender address.", nameof(configuration));
+			}
 
-				var sendGridConfig = EmailSwitchSettings.GetSection(EmailProvider.SendGrid.ToString());
+			if (string.IsNullOrWhiteSpace(apiKey))
+			{
+				throw new ArgumentException($"{settingsPath}:Password (the SendGrid API key) is missing.", nameof(configuration));
+			}
 
-				SendGridSettings = new SendGridSettings()
+			SendGridSettings = new SendGridSettings()
+			{
+				OtpLength = EmailSwitchGeneralSettings.OtpLength,
+				SendGridPrivateSettings = new SendGridPrivateSettings()
 				{
-					OtpLength = EmailSwitchGeneralSettings.OtpLength,
-					SendGridPrivateSettings = new SendGridPrivateSettings()
-					{
-						From = sendGridConfig["From"],
-						//Host = sendGridConfig["Host"],
-						//Username = sendGridConfig["Username"],
-						Password = sendGridConfig["Password"],
-						//SecureSocketOptions = sendGridConfig["SecureSocketOptions"],
-						//Port = int.TryParse(sendGridConfig["Port"], out int portNumber) ? portNumber : 587,
-
-					}
-				};
-				SendGridClient = new SendGridClient(SendGridSettings.SendGridPrivateSettings.Password);
-			}
-			catch (Exception ex)
-			{
-				logger.LogError(ex, "Unable to initialize SendGrid");
-			}
+					From = from,
+					Password = apiKey
+				}
+			};
+			SendGridClient = new SendGridClient(apiKey);
 		}
 	}
 }

@@ -4,24 +4,47 @@ using MongoDB.Bson.Serialization.Attributes;
 
 namespace EmailSwitch.Database.DTOs
 {
+	/// <summary>
+	/// Timestamps are stored as UTC <see cref="DateTime"/> rather than <see cref="DateTimeOffset"/>
+	/// deliberately. The driver serialises a DateTimeOffset as a subdocument, which cannot be range
+	/// queried or indexed as an instant - that forced expiry filtering to happen client side over
+	/// every session ever recorded for an address. A plain BSON date lets the server do it.
+	/// </summary>
 	public sealed class EmailSwitchSession
 	{
 		[BsonId]
 		public required string SessionId { get; init; }
 		public required string EmailId { get; init; }
-		public required DateTimeOffset StartTimeUTC { get; init; }
-		public DateTimeOffset? SuccessfullyVerifiedTimestampUTC { get; set; }
-		public required DateTimeOffset ExpiryTimeUTC { get; init; }
+
+		[BsonDateTimeOptions(Kind = DateTimeKind.Utc)]
+		public required DateTime StartTimeUTC { get; init; }
+
+		[BsonDateTimeOptions(Kind = DateTimeKind.Utc)]
+		public DateTime? SuccessfullyVerifiedTimestampUTC { get; set; }
+
+		[BsonDateTimeOptions(Kind = DateTimeKind.Utc)]
+		public required DateTime ExpiryTimeUTC { get; init; }
+
 		public Queue<EmailProvider>? EmailProvidersQueue { get; set; }
 		public List<AttemptDetailsSendOTP> SentAttempts { get; set; } = [];
-		public List<DateTimeOffset> LogoRenderedAttemptsDateTimeOffset { get; set; } = [];
-		public List<DateTimeOffset> FailedVerificationAttemptsDateTimeOffset { get; set; } = [];
-		public EmailContent SendOTPEmail { get; set; }
 
+		[BsonDateTimeOptions(Kind = DateTimeKind.Utc)]
+		public List<DateTime> LogoRenderedAttemptsUTC { get; set; } = [];
+
+		[BsonDateTimeOptions(Kind = DateTimeKind.Utc)]
+		public List<DateTime> FailedVerificationAttemptsUTC { get; set; } = [];
+
+		public required EmailContent SendOTPEmail { get; set; }
+
+		/// <summary>
+		/// The expiry and already-verified conditions are also applied server side by
+		/// EmailSwitchDbService.GetLatestSession. They are repeated here so the rule holds for any
+		/// session, however it was loaded.
+		/// </summary>
 		internal bool HasNotExpired(byte maximumFailedAttemptsToVerify) =>
 			(EmailProvidersQueue?.Any() ?? true) && // if it has become empty from failed attempts then it has expired
-			FailedVerificationAttemptsDateTimeOffset.Count() < maximumFailedAttemptsToVerify &&
+			FailedVerificationAttemptsUTC.Count < maximumFailedAttemptsToVerify &&
 			SuccessfullyVerifiedTimestampUTC == null &&
-			DateTimeOffset.UtcNow < ExpiryTimeUTC;
+			DateTime.UtcNow < ExpiryTimeUTC;
 	}
 }
