@@ -183,6 +183,39 @@ namespace EmailSwitch.Tests
 		}
 
 		/// <summary>
+		/// Priority means order, and the order is the failover chain. This was a HashSet, which does
+		/// not promise enumeration order - it happens to preserve insertion order while nothing is
+		/// removed, which is an implementation detail rather than something to route email on.
+		/// </summary>
+		[Fact]
+		public void The_configured_order_is_the_order_providers_are_tried()
+		{
+			var initializer = Create(priority: ["DevConsole", "SendGrid"]);
+
+			Assert.Equal([EmailProvider.DevConsole, EmailProvider.SendGrid], initializer.EmailControls.Priority);
+		}
+
+		[Fact]
+		public void The_reverse_order_is_also_preserved()
+		{
+			var initializer = Create(priority: ["SendGrid", "DevConsole"]);
+
+			Assert.Equal([EmailProvider.SendGrid, EmailProvider.DevConsole], initializer.EmailControls.Priority);
+		}
+
+		/// <summary>
+		/// Listing a provider twice would otherwise double its share of the send budget, which is not
+		/// what repeating a name in a priority list means.
+		/// </summary>
+		[Fact]
+		public void A_provider_named_twice_is_listed_once_in_its_first_position()
+		{
+			var initializer = Create(priority: ["DevConsole", "SendGrid", "devconsole"]);
+
+			Assert.Equal([EmailProvider.DevConsole, EmailProvider.SendGrid], initializer.EmailControls.Priority);
+		}
+
+		/// <summary>
 		/// An empty priority list would leave SendOTP with nothing to try, so it must fail at startup
 		/// rather than return IsSent = false forever.
 		/// </summary>

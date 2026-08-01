@@ -83,10 +83,10 @@ namespace EmailSwitch.Common
 			return sessionRetentionDays;
 		}
 
-		private static HashSet<EmailProvider> GetPriority(string[] configuredProviders, ILogger logger)
+		private static List<EmailProvider> GetPriority(string[] configuredProviders, ILogger logger)
 		{
 			var knownProviders = string.Join(", ", Enum.GetNames<EmailProvider>());
-			var priority = new HashSet<EmailProvider>();
+			var priority = new List<EmailProvider>();
 
 			foreach (var configuredProvider in configuredProviders)
 			{
@@ -96,7 +96,13 @@ namespace EmailSwitch.Common
 				if (!int.TryParse(configuredProvider, out _)
 					&& Enum.TryParse(configuredProvider, ignoreCase: true, out EmailProvider emailProvider))
 				{
-					priority.Add(emailProvider);
+					// De-duplicated here rather than by using a set, so the configured order is the
+					// order providers are tried. Listing one twice would otherwise double its share of
+					// the send budget, which is not what repeating a name in a priority list means.
+					if (!priority.Contains(emailProvider))
+					{
+						priority.Add(emailProvider);
+					}
 				}
 				else
 				{
