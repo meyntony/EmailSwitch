@@ -48,6 +48,9 @@ namespace EmailSwitch.Tests
 				.SendOTP("user@example.com", Content());
 
 			Assert.False(response.IsSent);
+			// Still reported, so a caller sizing its input field off the response does not get zero
+			// just because this provider declined.
+			Assert.Equal(6, response.OtpLength);
 		}
 
 		// ------------------------------------------------------------------ registration

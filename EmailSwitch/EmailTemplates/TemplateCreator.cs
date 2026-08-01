@@ -31,18 +31,23 @@ namespace EmailSwitch.EmailTemplates
 				Subject = TranslationKey.SendOTPEmailSubject.GetTranslation(preferredLanguageIsoCode).FirstOrDefault()
 						  ?? TranslationKey.SendOTPEmailSubject.GetTranslation(new LanguageIsoCode()).FirstOrDefault()
 						  ?? FallbackSubject,
+				// The verified lists are omitted when empty rather than rendered as a bare heading with
+				// nothing after it. Mobile numbers used to be unconditional, unlike emails right below.
 				PlainTextContent = $"Verification Code: {generatedCode}\n" +
 								   $"Expiry Time: {expiryTime}\n" +
-								   $"Verified Mobile Numbers: {string.Join(", ", verifiedMobileNumberStrings)}\n" +
+								   (verifiedMobileNumberStrings.Any() ? $"Verified Mobile Numbers: {string.Join(", ", verifiedMobileNumberStrings)}\n" : "") +
 								   (verifiedEmailStrings.Any() ? $"Verified Emails: {string.Join(", ", verifiedEmailStrings)}" : ""),
 				// Every interpolated value is encoded: the addresses originate from user input, and
 				// MailAddress validation is not an HTML sanitiser - a quoted local part or display
 				// name can legitimately carry '<' or '"'.
 				HtmlContent = $"<h1>Verification Code for {Encode(emailPendingVerification.GetRawValue())}: {Encode(generatedCode)}</h1>" +
 							  $"<p>Expiry Time: {Encode(expiryTime)}</p>" +
-							  $"<p>Verified Mobile Numbers: {Encode(string.Join(", ", verifiedMobileNumberStrings))}</p>" +
+							  (verifiedMobileNumberStrings.Any() ? $"<p>Verified Mobile Numbers: {Encode(string.Join(", ", verifiedMobileNumberStrings))}</p>" : "") +
 							  (verifiedEmailStrings.Any() ? $"<p>Verified Emails: {Encode(string.Join(", ", verifiedEmailStrings))}</p>" : "") +
-							  $"<img src=\"{Encode(signatureLogoUri.ToString())}\">"
+							  // alt text, so a client that blocks images - which many do by default for
+							  // an unknown sender - shows something rather than an empty box. No
+							  // dimensions: the logo should render at its natural size.
+							  $"<img src=\"{Encode(signatureLogoUri.ToString())}\" alt=\"Signature logo\">"
 			};
 		}
 

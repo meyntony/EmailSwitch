@@ -119,7 +119,58 @@ namespace EmailSwitch.Tests
 		{
 			var content = Create();
 
-			Assert.Contains($"<img src=\"{SignatureLogoUri}\">", content.HtmlContent);
+			Assert.Contains($"<img src=\"{SignatureLogoUri}\" alt=\"Signature logo\">", content.HtmlContent);
+		}
+
+		/// <summary>
+		/// Many clients block images from an unknown sender by default, so the signature needs alt
+		/// text rather than leaving an empty box. It must not carry dimensions - that would render the
+		/// logo as a one pixel tracking dot instead of a logo.
+		/// </summary>
+		[Fact]
+		public void The_signature_logo_has_alt_text_and_no_forced_dimensions()
+		{
+			var content = Create();
+
+			Assert.Contains("alt=\"Signature logo\"", content.HtmlContent);
+			Assert.DoesNotContain("width=", content.HtmlContent);
+			Assert.DoesNotContain("height=", content.HtmlContent);
+		}
+
+		// ---------------------------------------------------------------- empty verified lists
+
+		/// <summary>
+		/// Mobile numbers used to be rendered unconditionally, so an empty list produced a bare
+		/// "Verified Mobile Numbers:" heading with nothing after it - unlike verified emails, which
+		/// were already conditional.
+		/// </summary>
+		[Fact]
+		public void An_empty_verified_mobile_number_list_is_omitted_entirely()
+		{
+			var content = TemplateCreator.CreateSendOTPEmail(
+				emailPendingVerification: "user@example.com",
+				verifiedMobileNumbers: [],
+				verifiedEmails: [],
+				preferredLanguageIsoCodeList: [new LanguageIsoCode(LanguageId.en)],
+				userAgent: UserAgent.WebBrowser,
+				generatedCode: "123456",
+				expiryDateTimeOffset: DateTimeOffset.UtcNow.AddMinutes(4),
+				signatureLogoUri: SignatureLogoUri);
+
+			Assert.DoesNotContain("Verified Mobile Numbers", content.PlainTextContent);
+			Assert.DoesNotContain("Verified Mobile Numbers", content.HtmlContent);
+			Assert.DoesNotContain("Verified Emails", content.PlainTextContent);
+		}
+
+		[Fact]
+		public void A_populated_verified_mobile_number_list_is_still_rendered()
+		{
+			var content = Create();
+
+			Assert.Contains("Verified Mobile Numbers: +45 12345678", content.PlainTextContent);
+			// The HTML body is encoded, and HtmlEncoder.Default escapes '+' to &#x2B;, so the number
+			// is asserted in its encoded form rather than as it reads in plain text.
+			Assert.Contains("Verified Mobile Numbers: &#x2B;45 12345678", content.HtmlContent);
 		}
 
 		/// <summary>Encoding belongs to the HTML body only - plain text must stay literal.</summary>

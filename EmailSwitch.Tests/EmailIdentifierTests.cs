@@ -88,6 +88,43 @@ namespace EmailSwitch.Tests
 			Assert.ThrowsAny<Exception>(() => new EmailIdentifier("user@example.com", "someone.else@example.com"));
 		}
 
+		/// <summary>
+		/// It is a struct, so default(EmailIdentifier) exists whether or not anyone means it to - an
+		/// uninitialised array element reaches these accessors with every field null. GetHashCode used
+		/// to throw NullReferenceException and ToString handed back a null through a non-nullable
+		/// return type, straight into the required EmailId a session is stored under.
+		/// </summary>
+		[Fact]
+		public void A_default_identifier_does_not_throw_from_its_accessors()
+		{
+			var uninitialised = default(EmailIdentifier);
+
+			Assert.Equal(string.Empty, uninitialised.ToString());
+			Assert.Equal(string.Empty, uninitialised.GetRawValue());
+			Assert.Equal(0, uninitialised.GetHashCode());
+			Assert.Equal(string.Empty, (string)uninitialised);
+		}
+
+		/// <summary>
+		/// The one accessor that cannot answer sensibly. Better a named failure than a
+		/// NullReferenceException from whatever went on to read the host.
+		/// </summary>
+		[Fact]
+		public void A_default_identifier_names_the_problem_when_asked_for_a_mail_address()
+		{
+			var uninitialised = default(EmailIdentifier);
+
+			var exception = Assert.Throws<InvalidOperationException>(() => uninitialised.GetMailAddress());
+			Assert.Contains("never initialised", exception.Message);
+		}
+
+		[Fact]
+		public void A_default_identifier_equals_nothing_including_another_default()
+		{
+			Assert.NotEqual(default, default(EmailIdentifier));
+			Assert.NotEqual(new EmailIdentifier("user@example.com"), default);
+		}
+
 		[Fact]
 		public void A_matching_email_id_is_accepted()
 		{

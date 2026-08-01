@@ -42,7 +42,13 @@ namespace EmailSwitch.Services.DevConsole
 					emailPendingVerification,
 					ConstantStrings.EmailSwitchSettingsName);
 
-				return Task.FromResult(new EmailSwitchResponseSendOTP() { IsSent = false });
+				// OtpLength reported even on the refusal, so a caller sizing its input field off the
+				// response does not get zero just because this provider declined.
+				return Task.FromResult(new EmailSwitchResponseSendOTP()
+				{
+					IsSent = false,
+					OtpLength = _emailSwitchGeneralInitializer.EmailSwitchGeneralSettings.OtpLength
+				});
 			}
 
 			// Warning rather than Information so it survives a default log filter - the whole point

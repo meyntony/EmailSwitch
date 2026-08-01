@@ -98,6 +98,29 @@ namespace EmailSwitch.Tests
 		}
 
 		/// <summary>
+		/// A resend once the budget is spent is refused, but the response still has to be useful: the
+		/// caller needs the code length to size its input and the deadline to run a countdown. Both
+		/// used to come back as zero and default(DateTimeOffset).
+		/// </summary>
+		[Fact]
+		public async Task A_refused_resend_still_reports_the_otp_length_and_the_deadline()
+		{
+			await WithHarness(async harness =>
+			{
+				var emailSwitchService = harness.Service;
+
+				// One provider and one round robin attempt, so the first send spends the budget.
+				Assert.True((await emailSwitchService.SendOTP(Email, [], [], [], UserAgent.WebBrowser)).IsSent);
+
+				var refused = await emailSwitchService.SendOTP(Email, [], [], [], UserAgent.WebBrowser);
+
+				Assert.False(refused.IsSent);
+				Assert.Equal(6, refused.OtpLength);
+				Assert.NotEqual(default, refused.ExpiryDateTimeOffset);
+			});
+		}
+
+		/// <summary>
 		/// The cap must not cost the legitimate holder their code. Two wrong guesses leave one slot,
 		/// and the correct code still verifies on it.
 		/// </summary>

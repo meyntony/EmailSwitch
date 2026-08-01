@@ -14,6 +14,7 @@ namespace EmailSwitch
 	public sealed class EmailSwitchService
 	{
 		private readonly EmailSwitchInitializer _emailSwitchInitializer;
+		private readonly EmailSwitchGeneralInitializer _emailSwitchGeneralInitializer;
 		private readonly IServiceProvider _serviceProvider;
 		private readonly EmailSwitchDbService _emailSwitchDbService;
 		private readonly AbstractTokenService _tokenService;
@@ -21,18 +22,33 @@ namespace EmailSwitch
 
 		public EmailSwitchService(
 			EmailSwitchInitializer emailSwitchInitializer,
+			EmailSwitchGeneralInitializer emailSwitchGeneralInitializer,
 			IServiceProvider serviceProvider,
 			EmailSwitchDbService emailSwitchDbService,
 			AbstractTokenService tokenService,
-		ILogger<EmailSwitchService> logger
+			ILogger<EmailSwitchService> logger
 			)
 		{
 			_emailSwitchInitializer = emailSwitchInitializer;
+			_emailSwitchGeneralInitializer = emailSwitchGeneralInitializer;
 			_serviceProvider = serviceProvider;
 			_emailSwitchDbService = emailSwitchDbService;
 			_tokenService = tokenService;
 			_logger = logger;
 		}
+
+		/// <summary>
+		/// Reported on every response, successful or not. A caller sizes its code input off this, and
+		/// a failed send used to hand back zero - SendGridService already went out of its way to
+		/// populate it on its own failure paths, so the ones here were simply inconsistent.
+		/// </summary>
+		private EmailSwitchResponseSendOTP FailedSend(DateTimeOffset? expiry = null) =>
+			new()
+			{
+				IsSent = false,
+				OtpLength = _emailSwitchGeneralInitializer.EmailSwitchGeneralSettings.OtpLength,
+				ExpiryDateTimeOffset = expiry ?? default
+			};
 
 		/// <summary>
 		/// Resolved per provider rather than injected, so a provider whose configuration is absent is
@@ -56,7 +72,7 @@ namespace EmailSwitch
 				if (session is null)
 				{
 					_logger.LogCritical("Unable to create or load a session to send an OTP to {Email}", email);
-					return new EmailSwitchResponseSendOTP() { IsSent = false };
+					return FailedSend();
 				}
 
 				// Only a null queue means "not started yet". An empty one means this session has
@@ -67,11 +83,7 @@ namespace EmailSwitch
 				if (emailProvidersQueue.Count == 0)
 				{
 					_logger.LogWarning("Send budget already spent for {Email} with SessionId: {SessionId}; not sending again.", email, session.SessionId);
-					return new EmailSwitchResponseSendOTP()
-					{
-						IsSent = false,
-						ExpiryDateTimeOffset = session.ExpiryTimeUTC
-					};
+					return FailedSend(session.ExpiryTimeUTC);
 				}
 
 				// The rendered email is retired once the code is verified or the budget is spent, so a
@@ -81,11 +93,7 @@ namespace EmailSwitch
 				if (session.SendOTPEmail is null)
 				{
 					_logger.LogCritical("Session {SessionId} has no rendered email left to send to {Email}", session.SessionId, email);
-					return new EmailSwitchResponseSendOTP()
-					{
-						IsSent = false,
-						ExpiryDateTimeOffset = session.ExpiryTimeUTC
-					};
+					return FailedSend(session.ExpiryTimeUTC);
 				}
 
 				// Accumulated in memory and written once at the end. The session document is never
@@ -118,7 +126,19 @@ namespace EmailSwitch
 					responseSendOTP.ExpiryDateTimeOffset = session.ExpiryTimeUTC;
 				}
 
-				await _emailSwitchDbService.RegisterSendAttempts(session.SessionId, emailProvidersQueue, sentAttempts);
+				try
+				{
+					await _emailSwitchDbService.RegisterSendAttempts(session.SessionId, emailProvidersQueue, sentAttempts);
+				}
+				catch (Exception exception)
+				{
+					// Contained separately, and deliberately does not change IsSent: the email really
+					// did go out, and reporting otherwise would invite the caller to resend and mail
+					// the recipient twice. What is lost is the record of the slot being spent, so the
+					// budget still shows room - which is a distinct failure from being unable to send,
+					// and is worth being able to tell apart in the logs.
+					_logger.LogCritical(exception, "Sent the OTP to {Email} but could not record it against SessionId: {SessionId}; the send budget was not decremented.", email, session.SessionId);
+				}
 
 				if (responseSendOTP == null || !responseSendOTP.IsSent)
 				{
@@ -129,7 +149,7 @@ namespace EmailSwitch
 			{
 				_logger.LogCritical(exception, "Unable to send OTP to {Email} with SessionId: {SessionId}", email, session?.SessionId);
 			}
-			return responseSendOTP ?? new EmailSwitchResponseSendOTP() { IsSent = false };
+			return responseSendOTP ?? FailedSend(session?.ExpiryTimeUTC);
 		}
 
 		/// <summary>
@@ -218,6 +238,15 @@ namespace EmailSwitch
 				// correct code as wrong - the caller could never retry it. Every path that can throw
 				// before the guess is checked leaves verified false anyway.
 				_logger.LogCritical(exception, "Unable to verify OTP for {Email}", email);
+
+				// Reported as expired whenever the guess could not actually be checked. A token
+				// written by MongoDbTokenManager 10.0.0 can never be read by the current one, so
+				// leaving this false told the caller "that code is not correct" and invited them to
+				// retype it forever. Asking for a new code is the one thing that does work.
+				if (!verified)
+				{
+					expired = true;
+				}
 			}
 
 			return new EmailSwitchResponseVerifyOTP()

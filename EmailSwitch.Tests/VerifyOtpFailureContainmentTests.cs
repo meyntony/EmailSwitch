@@ -52,5 +52,21 @@ namespace EmailSwitch.Tests
 
 			Assert.False(response.IsSent);
 		}
+
+		/// <summary>
+		/// A caller sizes its code input off OtpLength, so a failed send handing back zero would have
+		/// it render a zero-length field. SendGridService already populated this on its own failure
+		/// paths; the ones in EmailSwitchService were simply inconsistent with it.
+		/// </summary>
+		[Fact]
+		public async Task A_failed_send_still_reports_the_otp_length()
+		{
+			var service = CreateServiceWithUnreachableDatabase();
+
+			var response = await service.SendOTP("user@example.com", [], [], [], SMSwitch.Common.DTOs.UserAgent.WebBrowser);
+
+			Assert.False(response.IsSent);
+			Assert.Equal(6, response.OtpLength);
+		}
 	}
 }

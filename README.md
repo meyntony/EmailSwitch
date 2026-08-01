@@ -213,7 +213,7 @@ for the actual send.
 | `Settings:FrontendUrl` | yes | — | Required by the shared settings package. |
 | `EmailSwitchSettings:OtpLength` | no | `6` | |
 | `EmailSwitchSettings:SignatureLogoPath` | yes | — | Read once at startup. `.png`, `.jpg`, `.gif`, `.webp` and `.svg` get a matching content type. |
-| `EmailSwitchSettings:Controls:Priority` | yes | — | Ordered provider list. Case-insensitive; unrecognised names are logged and skipped. |
+| `EmailSwitchSettings:Controls:Priority` | yes | — | Ordered provider list — the order is the failover order. Case-insensitive; unrecognised names are logged and skipped, and a name repeated is kept once, in its first position. |
 | `EmailSwitchSettings:Controls:MaxRoundRobinAttempts` | no | `1` | Times the priority list repeats. `Priority.Count × MaxRoundRobinAttempts` is the total emails one session may send. |
 | `EmailSwitchSettings:Controls:MaximumFailedAttemptsToVerify` | no | `3` | Wrong guesses before the session dies. |
 | `EmailSwitchSettings:Controls:SessionTimeoutInSeconds` | no | `240` | **Minimum 30.** Below that, startup fails. |

@@ -32,13 +32,21 @@ namespace EmailSwitch.Common.Logo
 
 					// Recording the render is diagnostic, so its own failure must not cost the reader
 					// the image. Contained here rather than left as an unobserved fire-and-forget task.
-					try
+					//
+					// Only for something shaped like a session id. The endpoint is public and
+					// unauthenticated by necessity - email clients fetch it with no credentials - so
+					// without this any caller could drive an unbounded number of database writes by
+					// varying the path segment. A filter that matches nothing is still a round trip.
+					if (Guid.TryParse(id, out _))
 					{
-						await emailSwitchDbService.RegisterRenderRequest(id);
-					}
-					catch (Exception ex)
-					{
-						logger.LogWarning(ex, "Unable to record the LOGO render request for :{ID}.", id);
+						try
+						{
+							await emailSwitchDbService.RegisterRenderRequest(id);
+						}
+						catch (Exception ex)
+						{
+							logger.LogWarning(ex, "Unable to record the LOGO render request for :{ID}.", id);
+						}
 					}
 
 					return Results.File(settings.SignatureLogoBytes, settings.SignatureLogoContentType);

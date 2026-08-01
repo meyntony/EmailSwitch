@@ -19,7 +19,12 @@ namespace EmailSwitch.Translations
 			return Array.Empty<string>();
 		}
 
-		public static Dictionary<TranslationKey, Dictionary<LanguageId, Dictionary<LanguageLocaleVariationCode, string[]>>> TranslationsDictionary = new()
+		/// <summary>
+		/// Read on every send, from any thread. It was a public mutable static field, so any consumer
+		/// could replace or mutate it while a send was reading it - and Dictionary is not safe for
+		/// concurrent read and write. Nothing writes to it now, and nothing outside can.
+		/// </summary>
+		private static readonly Dictionary<TranslationKey, Dictionary<LanguageId, Dictionary<LanguageLocaleVariationCode, string[]>>> TranslationsDictionary = new()
 		{
 			{
 				TranslationKey.SendOTPEmailSubject,
