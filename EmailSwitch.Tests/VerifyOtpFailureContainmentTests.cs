@@ -1,11 +1,4 @@
-﻿using EmailSwitch.Common;
-using EmailSwitch.Database;
-using EmailSwitch.Services.SendGrid;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.Logging.Abstractions;
-using MongoDbService;
-using MongoDbTokenManager.Database;
-using uSignIn.CommonSettings.Settings;
+﻿using Microsoft.Extensions.DependencyInjection;
 
 namespace EmailSwitch.Tests
 {
@@ -15,52 +8,15 @@ namespace EmailSwitch.Tests
 	/// upgrade, where a token document written by the old version raises a FormatException on read -
 	/// see <see cref="StoredTokenCompatibilityTests"/>.
 	///
-	/// The whole object graph is built for real against an unreachable MongoDB. MongoClient does not
-	/// connect eagerly, so construction succeeds and the failure lands where it matters: on the
-	/// query inside VerifyOTP.
+	/// Resolved from a real container built against an unreachable MongoDB. The driver does not
+	/// connect eagerly, so resolution succeeds and the failure lands where it matters: on the query.
 	/// </summary>
 	public sealed class VerifyOtpFailureContainmentTests
 	{
-		private static EmailSwitchService CreateServiceWithUnreachableDatabase()
-		{
-			var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
-			{
-				// Unroutable, with the timeouts pulled right down so the test fails fast.
-				["MongoDbSettings:ConnectionString"] = "mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=150&connectTimeoutMS=150&socketTimeoutMS=150",
-				["MongoDbSettings:DatabaseName"] = "EmailSwitchTests",
-				["MongoDbSettings:ConnectionRecordRetentionDays"] = "0",
-
-				["Settings:BaseUrl"] = "https://api.example.com",
-				["Settings:FrontendUrl"] = "https://app.example.com",
-
-				["EmailSwitchSettings:OtpLength"] = "6",
-				["EmailSwitchSettings:SignatureLogoPath"] = "logo.png",
-				["EmailSwitchSettings:SendGrid:From"] = "noreply@example.com",
-				["EmailSwitchSettings:SendGrid:Password"] = "SG.fake-api-key",
-				["EmailSwitchSettings:Controls:Priority:0"] = "SendGrid",
-				["EmailSwitchSettings:Controls:MaximumFailedAttemptsToVerify"] = "3",
-				["EmailSwitchSettings:Controls:SessionTimeoutInSeconds"] = "240"
-			}).Build();
-
-			var mongoService = new MongoService(configuration, NullLogger<MongoService>.Instance);
-			var sendGridInitializer = new SendGridInitializer(configuration, NullLogger<SendGridInitializer>.Instance);
-			var tokenService = new MongoDbTokenService(mongoService);
-
-			var dbService = new EmailSwitchDbService(
-				mongoService,
-				new EmailSwitchInitializer(configuration),
-				tokenService,
-				sendGridInitializer,
-				new SettingsService(configuration, NullLogger<SettingsService>.Instance),
-				NullLogger<EmailSwitchDbService>.Instance);
-
-			return new EmailSwitchService(
-				new EmailSwitchInitializer(configuration),
-				new SendGridService(sendGridInitializer, NullLogger<SendGridService>.Instance),
-				dbService,
-				tokenService,
-				NullLogger<EmailSwitchService>.Instance);
-		}
+		private static EmailSwitchService CreateServiceWithUnreachableDatabase() =>
+			TestHost
+				.Build(TestHost.BaseSettings().WithSendGrid().WithPriority("SendGrid"))
+				.GetRequiredService<EmailSwitchService>();
 
 		[Fact]
 		public async Task VerifyOTP_reports_a_failed_verification_instead_of_throwing_when_the_datastore_fails()

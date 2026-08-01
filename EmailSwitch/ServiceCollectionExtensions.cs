@@ -1,5 +1,6 @@
 ﻿using EmailSwitch.Common;
 using EmailSwitch.Database;
+using EmailSwitch.Services.DevConsole;
 using EmailSwitch.Services.SendGrid;
 using Microsoft.Extensions.DependencyInjection;
 using uSignIn.CommonSettings;
@@ -19,19 +20,24 @@ namespace EmailSwitch
 			services.AddCommonSettingsServices();
 
 			services.AddSingleton<EmailSwitchInitializer>();
-
-			// SendGridInitializer derives from EmailSwitchGeneralInitializer. Registering both
-			// independently produced two instances, each reading the signature logo from disk, and
-			// left EmailSignatureLogoEndpoint and EmailSwitchDbService reading different copies.
-			// Forwarding the base type to the same singleton keeps one instance and one disk read.
-			// Revisit this if EmailProvider ever gains a second provider - the base registration
-			// would then no longer belong to SendGrid.
-			services.AddSingleton<SendGridInitializer>();
-			services.AddSingleton<EmailSwitchGeneralInitializer>(serviceProvider => serviceProvider.GetRequiredService<SendGridInitializer>());
-
+			services.AddSingleton<EmailSwitchGeneralInitializer>();
 			services.AddSingleton<EmailSwitchDbService>();
 
+			// Provider registrations are only constructed when a provider is actually resolved
+			// through the keyed lookup below. That is what lets a DevConsole-only setup start with
+			// no SendGrid section at all - SendGridInitializer fails fast on missing credentials, so
+			// eagerly depending on it anywhere would make credential-free local development
+			// impossible.
+			services.AddSingleton<SendGridInitializer>();
 			services.AddScoped<SendGridService>();
+			services.AddScoped<DevConsoleService>();
+
+			// Keyed by provider so EmailSwitchService can resolve one by EmailProvider instead of
+			// switching on it. The factories resolve the concrete registrations above, so there is
+			// still one instance of each per scope and anything injecting SendGridService directly
+			// keeps working.
+			services.AddKeyedScoped<IServiceEmails>(EmailProvider.SendGrid, (serviceProvider, _) => serviceProvider.GetRequiredService<SendGridService>());
+			services.AddKeyedScoped<IServiceEmails>(EmailProvider.DevConsole, (serviceProvider, _) => serviceProvider.GetRequiredService<DevConsoleService>());
 
 			services.AddScoped<EmailSwitchService>();
 		}

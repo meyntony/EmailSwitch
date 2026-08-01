@@ -20,6 +20,7 @@ namespace EmailSwitch.Tests
 			StartTimeUTC = DateTime.UtcNow,
 			ExpiryTimeUTC = DateTime.UtcNow.AddMinutes(4),
 			SuccessfullyVerifiedTimestampUTC = DateTime.UtcNow,
+			EmailProvidersQueue = new Queue<EmailProvider>([EmailProvider.SendGrid, EmailProvider.DevConsole]),
 			SentAttempts = [new AttemptDetailsSendOTP(DateTime.UtcNow, EmailProvider.SendGrid, true)],
 			FailedVerificationAttemptsUTC = [DateTime.UtcNow],
 			LogoRenderedAttemptsUTC = [DateTime.UtcNow],
@@ -91,6 +92,31 @@ namespace EmailSwitch.Tests
 			Assert.Equal(session.SendOTPEmail.HtmlContent, roundTripped.SendOTPEmail.HtmlContent);
 			Assert.Single(roundTripped.SentAttempts);
 			Assert.Equal(EmailProvider.SendGrid, roundTripped.SentAttempts[0].EmailProvider);
+		}
+
+		/// <summary>
+		/// The send budget only works if the queue survives a round trip, and SendOTP distinguishes a
+		/// null queue (not started) from an empty one (spent) - so both states have to come back as
+		/// they went in, not collapse into each other.
+		/// </summary>
+		[Fact]
+		public void The_provider_queue_round_trips_including_the_difference_between_empty_and_null()
+		{
+			var session = CreateSession();
+
+			var withSlots = BsonSerializer.Deserialize<EmailSwitchSession>(session.ToBsonDocument());
+			Assert.NotNull(withSlots.EmailProvidersQueue);
+			Assert.Equal(2, withSlots.EmailProvidersQueue!.Count);
+			Assert.Equal(EmailProvider.SendGrid, withSlots.EmailProvidersQueue.Peek());
+
+			session.EmailProvidersQueue = new Queue<EmailProvider>();
+			var spent = BsonSerializer.Deserialize<EmailSwitchSession>(session.ToBsonDocument());
+			Assert.NotNull(spent.EmailProvidersQueue);
+			Assert.Empty(spent.EmailProvidersQueue!);
+
+			session.EmailProvidersQueue = null;
+			var notStarted = BsonSerializer.Deserialize<EmailSwitchSession>(session.ToBsonDocument());
+			Assert.Null(notStarted.EmailProvidersQueue);
 		}
 
 		private sealed class WithOffset

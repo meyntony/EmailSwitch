@@ -1,19 +1,26 @@
 ﻿using EmailSwitch.Common;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using SendGrid;
 
 namespace EmailSwitch.Services.SendGrid
 {
-	public sealed class SendGridInitializer: EmailSwitchGeneralInitializer
+	/// <summary>
+	/// Composes <see cref="EmailSwitchGeneralInitializer"/> rather than deriving from it. Deriving
+	/// meant the two were either two singletons reading the signature logo from disk twice, or one
+	/// registration forwarded to the other - and the forwarding version made every consumer of the
+	/// general settings depend on SendGrid credentials being present, which left no way to run on
+	/// the DevConsole provider alone.
+	/// </summary>
+	public sealed class SendGridInitializer
 	{
 		internal readonly SendGridSettings SendGridSettings;
 		public readonly SendGridClient SendGridClient;
+
 		public SendGridInitializer(
-			IConfiguration configuration,
-			ILogger<SendGridInitializer> logger) : base(configuration, logger)
+			EmailSwitchGeneralInitializer emailSwitchGeneralInitializer,
+			ILogger<SendGridInitializer> logger)
 		{
-			var sendGridConfig = EmailSwitchSettings.GetSection(EmailProvider.SendGrid.ToString());
+			var sendGridConfig = emailSwitchGeneralInitializer.EmailSwitchSettings.GetSection(EmailProvider.SendGrid.ToString());
 
 			var from = sendGridConfig["From"];
 			var apiKey = sendGridConfig["Password"];
@@ -25,17 +32,17 @@ namespace EmailSwitch.Services.SendGrid
 
 			if (string.IsNullOrWhiteSpace(from))
 			{
-				throw new ArgumentException($"{settingsPath}:From is missing. SendGrid cannot send without a sender address.", nameof(configuration));
+				throw new ArgumentException($"{settingsPath}:From is missing. SendGrid cannot send without a sender address.", nameof(emailSwitchGeneralInitializer));
 			}
 
 			if (string.IsNullOrWhiteSpace(apiKey))
 			{
-				throw new ArgumentException($"{settingsPath}:Password (the SendGrid API key) is missing.", nameof(configuration));
+				throw new ArgumentException($"{settingsPath}:Password (the SendGrid API key) is missing.", nameof(emailSwitchGeneralInitializer));
 			}
 
 			SendGridSettings = new SendGridSettings()
 			{
-				OtpLength = EmailSwitchGeneralSettings.OtpLength,
+				OtpLength = emailSwitchGeneralInitializer.EmailSwitchGeneralSettings.OtpLength,
 				SendGridPrivateSettings = new SendGridPrivateSettings()
 				{
 					From = from,
@@ -43,6 +50,8 @@ namespace EmailSwitch.Services.SendGrid
 				}
 			};
 			SendGridClient = new SendGridClient(apiKey);
+
+			logger.LogInformation("SendGrid initialised for sender {From}.", from);
 		}
 	}
 }

@@ -88,8 +88,10 @@ namespace EmailSwitch.Tests
 				["EmailSwitchSettings:SendGrid:Password"] = password
 			};
 
+			var configuration = new ConfigurationBuilder().AddInMemoryCollection(values).Build();
+
 			return new SendGridInitializer(
-				new ConfigurationBuilder().AddInMemoryCollection(values).Build(),
+				new EmailSwitchGeneralInitializer(configuration, NullLogger<EmailSwitchGeneralInitializer>.Instance),
 				NullLogger<SendGridInitializer>.Instance);
 		}
 
@@ -162,7 +164,7 @@ namespace EmailSwitch.Tests
 				values[$"EmailSwitchSettings:Controls:Priority:{index}"] = value;
 			}
 
-			return new EmailSwitchInitializer(new ConfigurationBuilder().AddInMemoryCollection(values).Build());
+			return new EmailSwitchInitializer(new ConfigurationBuilder().AddInMemoryCollection(values).Build(), NullLogger<EmailSwitchInitializer>.Instance);
 		}
 
 		[Fact]
@@ -204,6 +206,61 @@ namespace EmailSwitch.Tests
 			Assert.Equal(3, controls.MaximumFailedAttemptsToVerify);
 			Assert.Equal(240, controls.SessionTimeoutInSeconds);
 			Assert.Equal(1, controls.MaxRoundRobinAttempts);
+		}
+
+		/// <summary>
+		/// Enum.TryParse is case-sensitive by default, so a lowercase provider name in an appsettings
+		/// file used to be dropped without a word - leaving either a shorter priority list or the
+		/// opaque "Priority list missing" failure.
+		/// </summary>
+		[Theory]
+		[InlineData("SendGrid")]
+		[InlineData("sendgrid")]
+		[InlineData("SENDGRID")]
+		[InlineData("SendGRID")]
+		public void Provider_names_are_matched_case_insensitively(string configuredProvider)
+		{
+			var initializer = Create(priority: [configuredProvider]);
+
+			Assert.Equal([EmailProvider.SendGrid], initializer.EmailControls.Priority);
+		}
+
+		/// <summary>
+		/// Enum.TryParse would read "0" as the first provider. A configuration file never means that,
+		/// and silently honouring it would hide a genuine typo.
+		/// </summary>
+		[Theory]
+		[InlineData("0")]
+		[InlineData("1")]
+		public void Numeric_provider_names_are_rejected(string configuredProvider)
+		{
+			Assert.ThrowsAny<Exception>(() => Create(priority: [configuredProvider]));
+		}
+
+		/// <summary>
+		/// Zero or less made every Generate throw into a swallowed IsSent = false, and anything under
+		/// the ten second display leeway made the email advertise an expiry already in the past.
+		/// </summary>
+		[Theory]
+		[InlineData("0")]
+		[InlineData("-1")]
+		[InlineData("5")]
+		[InlineData("29")]
+		public void A_session_timeout_below_the_minimum_is_rejected(string sessionTimeoutInSeconds)
+		{
+			var exception = Assert.Throws<ArgumentException>(() => Create(sessionTimeoutInSeconds: sessionTimeoutInSeconds));
+
+			Assert.Contains("SessionTimeoutInSeconds", exception.Message);
+		}
+
+		[Theory]
+		[InlineData("30")]
+		[InlineData("240")]
+		public void A_session_timeout_at_or_above_the_minimum_is_accepted(string sessionTimeoutInSeconds)
+		{
+			var controls = Create(sessionTimeoutInSeconds: sessionTimeoutInSeconds).EmailControls;
+
+			Assert.Equal(int.Parse(sessionTimeoutInSeconds), controls.SessionTimeoutInSeconds);
 		}
 
 		[Fact]

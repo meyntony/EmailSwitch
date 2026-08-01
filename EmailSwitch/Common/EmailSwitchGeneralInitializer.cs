@@ -26,7 +26,9 @@ namespace EmailSwitch.Common
 			try {
 				signatureLogoInBytes = File.ReadAllBytes(signatureLogoPath);
 			} catch (Exception ex) {
-				logger.LogCritical(ex, "Logo not found!");
+				// Not fatal: the logo endpoint turns empty bytes into a 404 rather than a broken
+				// image, and an OTP email without a signature logo is still a working OTP email.
+				logger.LogCritical(ex, "Unable to read the signature logo from {SignatureLogoPath}; emails will be sent without it.", signatureLogoPath);
 			}
 
 

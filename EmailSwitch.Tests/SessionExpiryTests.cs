@@ -53,13 +53,18 @@ namespace EmailSwitch.Tests
 			Assert.True(session.HasNotExpired(MaximumFailedAttemptsToVerify));
 		}
 
-		/// <summary>An empty queue means every provider has been tried and failed.</summary>
+		/// <summary>
+		/// The provider queue is a send budget, not a verification rule. It drains as emails go out,
+		/// success included, so treating an empty one as expiry meant a delivered, in-date code
+		/// stopped verifying the moment the budget ran out - one resend click locked the holder out
+		/// of a code already sitting in their inbox.
+		/// </summary>
 		[Fact]
-		public void A_session_whose_provider_queue_is_exhausted_has_expired()
+		public void A_session_whose_send_budget_is_spent_can_still_be_verified()
 		{
 			var session = CreateSession(new Queue<EmailProvider>());
 
-			Assert.False(session.HasNotExpired(MaximumFailedAttemptsToVerify));
+			Assert.True(session.HasNotExpired(MaximumFailedAttemptsToVerify));
 		}
 
 		/// <summary>

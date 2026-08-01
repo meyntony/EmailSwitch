@@ -20,8 +20,15 @@ namespace EmailSwitch.Database
 		private readonly EmailSwitchGeneralInitializer _emailSwitchGeneralInitializer;
 		private readonly SettingsService _settingsService;
 		private readonly ILogger<EmailSwitchDbService> _logger;
+		/// <summary>
+		/// GetOrCreateAndGetLatestSession keeps at most one live session per address, so this only
+		/// has to be large enough to cover stale rows that have not yet aged out of the filter.
+		/// </summary>
+		private const int MaximumCandidateSessions = 16;
+
 		private readonly SemaphoreSlim _indexGate = new(1, 1);
 		private volatile bool _indexReady;
+		private volatile bool _indexWarningLogged;
 
 		public EmailSwitchDbService(
 			MongoService mongoService,
@@ -76,8 +83,15 @@ namespace EmailSwitch.Database
 			}
 			catch (Exception exception)
 			{
-				// A missing index costs performance, not correctness, so let the caller proceed.
-				_logger.LogWarning(exception, "Unable to ensure the lookup index on {Collection}; queries will scan the collection.", nameof(EmailSwitchSession));
+				// A missing index costs performance, not correctness, so let the caller proceed. The
+				// attempt is not marked ready, so a transient outage does not leave the collection
+				// permanently unindexed - but the warning is logged once rather than on every query
+				// for as long as the server is unreachable.
+				if (!_indexWarningLogged)
+				{
+					_indexWarningLogged = true;
+					_logger.LogWarning(exception, "Unable to ensure the lookup index on {Collection}; queries will scan the collection.", nameof(EmailSwitchSession));
+				}
 			}
 			finally
 			{
@@ -143,7 +157,7 @@ namespace EmailSwitch.Database
 					Builders<EmailSwitchSession>.Filter.Eq(session => session.SuccessfullyVerifiedTimestampUTC, null),
 					Builders<EmailSwitchSession>.Filter.Gt(session => session.ExpiryTimeUTC, DateTime.UtcNow)))
 				.SortByDescending(session => session.ExpiryTimeUTC)
-				.Limit(16)
+				.Limit(MaximumCandidateSessions)
 				.ToListAsync();
 
 			return candidates.FirstOrDefault(session => session.HasNotExpired(_emailSwitchInitializer.EmailControls.MaximumFailedAttemptsToVerify));
@@ -152,10 +166,49 @@ namespace EmailSwitch.Database
 		private FilterDefinition<EmailSwitchSession> Filter(string sessionId) => Builders<EmailSwitchSession>.Filter.Eq(t => t.SessionId, sessionId);
 		private FilterDefinition<EmailSwitchSession> Filter(EmailIdentifier emailPendingVerification) => Builders<EmailSwitchSession>.Filter.Eq(t => t.EmailId, emailPendingVerification.ToString());
 
+		/// <summary>
+		/// Not an upsert. The session is always inserted by GetOrCreateAndGetLatestSession before
+		/// this runs, so upserting could only ever resurrect a document that something else had
+		/// deliberately removed.
+		/// </summary>
 		internal async Task UpdateSession(EmailSwitchSession session)
 		{
-			var options = new ReplaceOptions { IsUpsert = true };
-			await _emailSwitchSessionCollection.ReplaceOneAsync(Filter(session.SessionId), session, options);
+			await _emailSwitchSessionCollection.ReplaceOneAsync(Filter(session.SessionId), session);
+		}
+
+		/// <summary>
+		/// Records a wrong guess and returns how many this session has now had, or null if the
+		/// session is gone.
+		///
+		/// A single atomic $push rather than read-modify-replace through <see cref="UpdateSession"/>.
+		/// That path lost concurrent failures - two guesses racing both read the same count, both
+		/// appended one, and the later write won - so guesses issued in parallel barely advanced the
+		/// counter. Since MongoDbTokenManager 10.2.0 dropped its own attempt limit this count is the
+		/// only thing standing between a caller and unlimited guesses at a six digit code, so it has
+		/// to be exact under concurrency.
+		/// </summary>
+		internal async Task<int?> RegisterFailedVerificationAttempt(string sessionId)
+		{
+			var updated = await _emailSwitchSessionCollection.FindOneAndUpdateAsync(
+				Filter(sessionId),
+				Builders<EmailSwitchSession>.Update.Push(session => session.FailedVerificationAttemptsUTC, DateTime.UtcNow),
+				new FindOneAndUpdateOptions<EmailSwitchSession> { ReturnDocument = ReturnDocument.After });
+
+			return updated?.FailedVerificationAttemptsUTC.Count;
+		}
+
+		/// <summary>
+		/// Stamps the session verified, only if it has not been already. ConsumeAndValidate already
+		/// guarantees a single winner for the token itself; the condition here keeps the stored
+		/// timestamp honest if that ever changes.
+		/// </summary>
+		internal async Task RegisterSuccessfulVerification(string sessionId)
+		{
+			await _emailSwitchSessionCollection.UpdateOneAsync(
+				Builders<EmailSwitchSession>.Filter.And(
+					Filter(sessionId),
+					Builders<EmailSwitchSession>.Filter.Eq(session => session.SuccessfullyVerifiedTimestampUTC, null)),
+				Builders<EmailSwitchSession>.Update.Set(session => session.SuccessfullyVerifiedTimestampUTC, DateTime.UtcNow));
 		}
 
 		internal async Task RegisterRenderRequest(string id)

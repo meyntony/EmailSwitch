@@ -4,6 +4,7 @@ using EmailSwitch.Database;
 using EmailSwitch.Database.DTOs;
 using EmailSwitch.Services.SendGrid;
 using HumanLanguages;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using MongoDbTokenManager;
 using SMSwitch.Common.DTOs;
@@ -13,25 +14,34 @@ namespace EmailSwitch
 	public sealed class EmailSwitchService
 	{
 		private readonly EmailSwitchInitializer _emailSwitchInitializer;
-		private readonly SendGridService _sendGridService;
+		private readonly IServiceProvider _serviceProvider;
 		private readonly EmailSwitchDbService _emailSwitchDbService;
 		private readonly AbstractTokenService _tokenService;
 		private readonly ILogger<EmailSwitchService> _logger;
 
 		public EmailSwitchService(
 			EmailSwitchInitializer emailSwitchInitializer,
-			SendGridService sendGridService,
+			IServiceProvider serviceProvider,
 			EmailSwitchDbService emailSwitchDbService,
 			AbstractTokenService tokenService,
 		ILogger<EmailSwitchService> logger
 			)
 		{
 			_emailSwitchInitializer = emailSwitchInitializer;
-			_sendGridService = sendGridService;
+			_serviceProvider = serviceProvider;
 			_emailSwitchDbService = emailSwitchDbService;
 			_tokenService = tokenService;
 			_logger = logger;
 		}
+
+		/// <summary>
+		/// Resolved per provider rather than injected, so a provider whose configuration is absent is
+		/// never constructed - that is what lets a DevConsole-only setup run without SendGrid
+		/// credentials. Adding a provider is a registration change in ServiceCollectionExtensions,
+		/// not an edit here.
+		/// </summary>
+		private IServiceEmails ProviderFor(EmailProvider emailProvider) =>
+			_serviceProvider.GetRequiredKeyedService<IServiceEmails>(emailProvider);
 
 		public async Task<EmailSwitchResponseSendOTP> SendOTP(EmailIdentifier email, MobileNumber[] verifiedMobileNumbers, EmailIdentifier[] verifiedEmails, HashSet<LanguageIsoCode> preferredLanguageIsoCodeList, UserAgent userAgent)
 		{
@@ -49,50 +59,33 @@ namespace EmailSwitch
 					return new EmailSwitchResponseSendOTP() { IsSent = false };
 				}
 
-				Queue<EmailProvider> emailProvidersQueue;
-				if (session.EmailProvidersQueue?.Any() ?? false)
-				{
-					emailProvidersQueue = session.EmailProvidersQueue;
-				}
-				else
-				{
-					emailProvidersQueue = new();
-					HashSet<EmailProvider> emailProviders = _emailSwitchInitializer.EmailControls.Priority;
-
-					for (int i = 0; i < _emailSwitchInitializer.EmailControls.MaxRoundRobinAttempts; i++)
-					{
-						foreach (EmailProvider emailProvider in emailProviders)
-						{
-							emailProvidersQueue.Enqueue(emailProvider);
-						}
-					}
-				}
+				// Only a null queue means "not started yet". An empty one means this session has
+				// spent its send budget and must not be silently refilled.
+				Queue<EmailProvider> emailProvidersQueue =
+					session.EmailProvidersQueue ?? BuildProviderQueue(_emailSwitchInitializer.EmailControls);
 
 				if (emailProvidersQueue.Count == 0)
 				{
+					_logger.LogWarning("Send budget already spent for {Email} with SessionId: {SessionId}; not sending again.", email, session.SessionId);
 					return new EmailSwitchResponseSendOTP()
 					{
-						IsSent = false
+						IsSent = false,
+						ExpiryDateTimeOffset = session.ExpiryTimeUTC
 					};
 				}
 
 				while (emailProvidersQueue.Any())
 				{
-					if (session.SentAttempts.Any())
-					{
-						emailProvidersQueue.Dequeue();
-						if (!emailProvidersQueue.Any())
-						{
-							break;
-						}
-					}
-					responseSendOTP = emailProvidersQueue.Peek() switch
-					{
-						EmailProvider.SendGrid => await _sendGridService.SendOTP(email, session.SendOTPEmail),
-						_ => throw new NotImplementedException(),
-					};
+					var emailProvider = emailProvidersQueue.Peek();
+					responseSendOTP = await ProviderFor(emailProvider).SendOTP(email, session.SendOTPEmail);
 
-					session.SentAttempts.Add(new AttemptDetailsSendOTP(DateTime.UtcNow, emailProvidersQueue.Peek(), responseSendOTP.IsSent));
+					session.SentAttempts.Add(new AttemptDetailsSendOTP(DateTime.UtcNow, emailProvider, responseSendOTP.IsSent));
+
+					// Every attempt spends one slot, success included, so a caller cannot mail the
+					// same address indefinitely by resending. Only a failure falls through to the
+					// next provider.
+					emailProvidersQueue.Dequeue();
+
 					if (responseSendOTP.IsSent)
 					{
 						break;
@@ -119,6 +112,26 @@ namespace EmailSwitch
 				_logger.LogCritical(exception, "Unable to send OTP to {Email} with SessionId: {SessionId}", email, session?.SessionId);
 			}
 			return responseSendOTP ?? new EmailSwitchResponseSendOTP() { IsSent = false };
+		}
+
+		/// <summary>
+		/// One slot per provider per round-robin attempt. This queue is the cap on how many emails a
+		/// single session can send: it is built once when the session starts, and every send attempt
+		/// spends a slot. Internal so the budget can be tested without a datastore.
+		/// </summary>
+		internal static Queue<EmailProvider> BuildProviderQueue(EmailControls emailControls)
+		{
+			var emailProvidersQueue = new Queue<EmailProvider>();
+
+			for (int i = 0; i < emailControls.MaxRoundRobinAttempts; i++)
+			{
+				foreach (EmailProvider emailProvider in emailControls.Priority)
+				{
+					emailProvidersQueue.Enqueue(emailProvider);
+				}
+			}
+
+			return emailProvidersQueue;
 		}
 
 		public async Task<EmailSwitchResponseVerifyOTP> VerifyOTP(EmailIdentifier email, string OTP)
@@ -148,13 +161,15 @@ namespace EmailSwitch
 					verified = await _tokenService.ConsumeAndValidate(session.SessionId, token: OTP);
 					if (verified)
 					{
-						session.SuccessfullyVerifiedTimestampUTC = DateTime.UtcNow;
+						await _emailSwitchDbService.RegisterSuccessfulVerification(session.SessionId);
 					}
 					else
 					{
-						session.FailedVerificationAttemptsUTC.Add(DateTime.UtcNow);
+						// Counted server side in one atomic operation. Reading the session, appending
+						// to it and replacing the whole document lost concurrent failures, which is
+						// exactly how a caller would defeat the attempt cap.
+						await _emailSwitchDbService.RegisterFailedVerificationAttempt(session.SessionId);
 					}
-					await _emailSwitchDbService.UpdateSession(session);
 				}
 			}
 			catch (Exception exception)
@@ -162,8 +177,12 @@ namespace EmailSwitch
 				// A stored token written by an older MongoDbTokenManager cannot be deserialized by
 				// the current one, which surfaces here as a FormatException. Report a failed
 				// verification rather than letting it escape to the caller as a server error.
+				//
+				// Deliberately not resetting verified: ConsumeAndValidate has already deleted the
+				// token by the time the session write runs, so failing that write must not report a
+				// correct code as wrong - the caller could never retry it. Every path that can throw
+				// before the guess is checked leaves verified false anyway.
 				_logger.LogCritical(exception, "Unable to verify OTP for {Email}", email);
-				verified = false;
 			}
 
 			return new EmailSwitchResponseVerifyOTP()

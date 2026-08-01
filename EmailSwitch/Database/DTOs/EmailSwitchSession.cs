@@ -37,12 +37,19 @@ namespace EmailSwitch.Database.DTOs
 		public required EmailContent SendOTPEmail { get; set; }
 
 		/// <summary>
+		/// Whether this session can still have a code verified against it.
+		///
+		/// Deliberately says nothing about <see cref="EmailProvidersQueue"/>. That queue is the send
+		/// budget, and it drains as emails go out - including on success. Treating an empty one as
+		/// expiry meant a delivered, in-date code stopped verifying the moment the budget ran out,
+		/// so a single resend could lock the holder out of a code already sitting in their inbox.
+		/// Running out of sends is handled where sends happen, in EmailSwitchService.SendOTP.
+		///
 		/// The expiry and already-verified conditions are also applied server side by
 		/// EmailSwitchDbService.GetLatestSession. They are repeated here so the rule holds for any
 		/// session, however it was loaded.
 		/// </summary>
 		internal bool HasNotExpired(byte maximumFailedAttemptsToVerify) =>
-			(EmailProvidersQueue?.Any() ?? true) && // if it has become empty from failed attempts then it has expired
 			FailedVerificationAttemptsUTC.Count < maximumFailedAttemptsToVerify &&
 			SuccessfullyVerifiedTimestampUTC == null &&
 			DateTime.UtcNow < ExpiryTimeUTC;
