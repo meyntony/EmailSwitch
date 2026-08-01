@@ -125,6 +125,102 @@ namespace EmailSwitch.Tests
 			Assert.Equal(concurrentSends, reloaded.SentAttempts.Count);
 		}
 
+		// ------------------------------------------------------------------ the attempt cap
+
+		/// <summary>
+		/// The guard that matters most. Reading the session, testing HasNotExpired and counting the
+		/// failure afterwards is check-then-act: guesses issued in parallel all passed the test before
+		/// any of them had been recorded, so the cap held sequentially and not at all under
+		/// concurrency. Since MongoDbTokenManager 10.2.0 dropped its own limit this is the only guard
+		/// on a six digit code.
+		/// </summary>
+		[Theory]
+		[InlineData(1)]
+		[InlineData(3)]
+		[InlineData(5)]
+		public async Task Concurrent_guesses_cannot_claim_more_attempts_than_the_cap(byte maximumFailedAttemptsToVerify)
+		{
+			await using var fixture = new EmailSwitchIntegrationFixture(maximumFailedAttemptsToVerify);
+			var session = await CreateSession(fixture);
+
+			const int concurrentGuesses = 60;
+			var reservations = await Task.WhenAll(Enumerable
+				.Range(0, concurrentGuesses)
+				.Select(_ => fixture.DbService.TryReserveVerificationAttempt(session!.SessionId, maximumFailedAttemptsToVerify)));
+
+			Assert.Equal(maximumFailedAttemptsToVerify, reservations.Count(reservation => reservation is not null));
+		}
+
+		[Fact]
+		public async Task Attempts_are_refused_once_the_cap_is_reached()
+		{
+			await using var fixture = new EmailSwitchIntegrationFixture(maximumFailedAttemptsToVerify: 3);
+			var session = await CreateSession(fixture);
+
+			for (var attempt = 0; attempt < 3; attempt++)
+			{
+				Assert.NotNull(await fixture.DbService.TryReserveVerificationAttempt(session!.SessionId, 3));
+			}
+
+			Assert.Null(await fixture.DbService.TryReserveVerificationAttempt(session!.SessionId, 3));
+		}
+
+		/// <summary>
+		/// The upgrade path. A session written before VerificationAttemptsCount existed carries its
+		/// attempts only in the audit list, and deserialises the counter to zero - so a cap read from
+		/// the counter alone would hand every in-flight session a fresh set of guesses.
+		/// </summary>
+		[Fact]
+		public async Task A_session_predating_the_counter_is_still_capped_by_its_audit_list()
+		{
+			await using var fixture = new EmailSwitchIntegrationFixture(maximumFailedAttemptsToVerify: 3);
+			var session = await CreateSession(fixture);
+
+			// Exactly the shape of a pre-upgrade session: failures recorded, counter never written.
+			for (var attempt = 0; attempt < 3; attempt++)
+			{
+				await fixture.DbService.RegisterFailedVerificationAttempt(session!.SessionId);
+			}
+			Assert.Equal(0, (await Reload(fixture, session!.SessionId)).VerificationAttemptsCount);
+
+			Assert.Null(await fixture.DbService.TryReserveVerificationAttempt(session.SessionId, 3));
+		}
+
+		/// <summary>A correct guess claims a slot too, but must not be recorded as a failure.</summary>
+		[Fact]
+		public async Task Claiming_an_attempt_does_not_write_to_the_failure_audit_trail()
+		{
+			await using var fixture = new EmailSwitchIntegrationFixture();
+			var session = await CreateSession(fixture);
+
+			await fixture.DbService.TryReserveVerificationAttempt(session!.SessionId, 3);
+
+			var reloaded = await Reload(fixture, session.SessionId);
+			Assert.Equal(1, reloaded.VerificationAttemptsCount);
+			Assert.Empty(reloaded.FailedVerificationAttemptsUTC);
+		}
+
+		[Fact]
+		public async Task A_verified_session_refuses_further_attempts()
+		{
+			await using var fixture = new EmailSwitchIntegrationFixture();
+			var session = await CreateSession(fixture);
+
+			await fixture.DbService.RegisterSuccessfulVerification(session!.SessionId);
+
+			Assert.Null(await fixture.DbService.TryReserveVerificationAttempt(session.SessionId, 3));
+		}
+
+		/// <summary>A cap of zero permits nothing, and must not index into the array at -1.</summary>
+		[Fact]
+		public async Task A_cap_of_zero_refuses_every_attempt()
+		{
+			await using var fixture = new EmailSwitchIntegrationFixture();
+			var session = await CreateSession(fixture);
+
+			Assert.Null(await fixture.DbService.TryReserveVerificationAttempt(session!.SessionId, 0));
+		}
+
 		[Fact]
 		public async Task A_session_that_has_used_up_its_attempts_is_no_longer_returned()
 		{

@@ -272,15 +272,61 @@ namespace EmailSwitch.Database
 		}
 
 		/// <summary>
+		/// Claims one verification attempt against this session, or returns null if there is no slot
+		/// left - or no live session to claim against.
+		///
+		/// This is what actually enforces <c>MaximumFailedAttemptsToVerify</c>. Reading the session,
+		/// testing <see cref="EmailSwitchSession.HasNotExpired"/> and counting the failure afterwards
+		/// is check-then-act: guesses issued in parallel all passed the test before any of them had
+		/// been recorded, so the cap held for sequential guesses and not at all for concurrent ones.
+		/// Since MongoDbTokenManager 10.2.0 dropped its own attempt limit, that was the only guard on
+		/// a six digit code.
+		///
+		/// The increment therefore happens <em>before</em> the guess is checked, in the same
+		/// findAndModify that tests the limit, so the server serialises the claims.
+		///
+		/// The liveness conditions are repeated here rather than trusted from the caller's earlier
+		/// read, because that read is exactly the stale value being guarded against.
+		/// </summary>
+		internal async Task<EmailSwitchSession?> TryReserveVerificationAttempt(string sessionId, byte maximumFailedAttemptsToVerify)
+		{
+			if (maximumFailedAttemptsToVerify == 0)
+			{
+				// No attempt is permitted at all, and the index expression below has no meaningful
+				// form for it.
+				return null;
+			}
+
+			var withinTheCap = Builders<EmailSwitchSession>.Filter.And(
+				Builders<EmailSwitchSession>.Filter.Lt(session => session.VerificationAttemptsCount, maximumFailedAttemptsToVerify),
+				// The pre-counter equivalent: if the array has an element at index cap-1 it already
+				// holds cap of them. Expressed as an existence test so a session written before
+				// VerificationAttemptsCount existed is still capped by its audit list.
+				Builders<EmailSwitchSession>.Filter.Exists(
+					$"{nameof(EmailSwitchSession.FailedVerificationAttemptsUTC)}.{maximumFailedAttemptsToVerify - 1}",
+					false));
+
+			return await _emailSwitchSessionCollection.FindOneAndUpdateAsync(
+				Builders<EmailSwitchSession>.Filter.And(
+					Filter(sessionId),
+					Builders<EmailSwitchSession>.Filter.Eq(session => session.SuccessfullyVerifiedTimestampUTC, null),
+					Builders<EmailSwitchSession>.Filter.Gt(session => session.ExpiryTimeUTC, DateTime.UtcNow),
+					withinTheCap),
+				Builders<EmailSwitchSession>.Update.Inc(session => session.VerificationAttemptsCount, 1),
+				new FindOneAndUpdateOptions<EmailSwitchSession> { ReturnDocument = ReturnDocument.After });
+		}
+
+		/// <summary>
 		/// Records a wrong guess and returns how many this session has now had, or null if the
 		/// session is gone.
 		///
-		/// A single atomic $push rather than read-modify-replace through <see cref="UpdateSession"/>.
-		/// That path lost concurrent failures - two guesses racing both read the same count, both
-		/// appended one, and the later write won - so guesses issued in parallel barely advanced the
-		/// counter. Since MongoDbTokenManager 10.2.0 dropped its own attempt limit this count is the
-		/// only thing standing between a caller and unlimited guesses at a six digit code, so it has
-		/// to be exact under concurrency.
+		/// The audit record of guesses that were genuinely wrong. The cap itself is claimed earlier by
+		/// <see cref="TryReserveVerificationAttempt"/>, so this no longer gates anything - a correct
+		/// guess must not land here, or the trail reports a failure that never happened.
+		///
+		/// Still a single atomic $push rather than a read-modify-replace of the session. That path lost
+		/// concurrent failures - two guesses racing both read the same list, both appended one, and the
+		/// later write won - so parallel guesses barely advanced the count.
 		/// </summary>
 		internal async Task<int?> RegisterFailedVerificationAttempt(string sessionId)
 		{

@@ -34,6 +34,22 @@ namespace EmailSwitch.Database.DTOs
 		[BsonDateTimeOptions(Kind = DateTimeKind.Utc)]
 		public List<DateTime> FailedVerificationAttemptsUTC { get; set; } = [];
 
+		/// <summary>
+		/// Verification attempts claimed against this session, incremented <em>before</em> the guess is
+		/// checked so the cap holds under concurrency.
+		///
+		/// Deliberately separate from <see cref="FailedVerificationAttemptsUTC"/>. That list is the
+		/// audit record of guesses that were actually wrong; this is a rate-limit reservation, and a
+		/// correct guess claims one too. Conflating them meant either recording a successful
+		/// verification as a failure or giving the reservation back, and the counter has to survive a
+		/// correct guess for the audit trail to stay honest.
+		///
+		/// Absent on sessions written before this field existed, where it deserialises to zero - which
+		/// is why <see cref="HasNotExpired"/> and the reservation filter both also consider the length
+		/// of the audit list.
+		/// </summary>
+		public int VerificationAttemptsCount { get; set; }
+
 		public required EmailContent SendOTPEmail { get; set; }
 
 		/// <summary>
@@ -48,10 +64,24 @@ namespace EmailSwitch.Database.DTOs
 		/// The expiry and already-verified conditions are also applied server side by
 		/// EmailSwitchDbService.GetLatestSession. They are repeated here so the rule holds for any
 		/// session, however it was loaded.
+		///
+		/// This is a read, so it can only ever be advisory: it is what the session looked like when it
+		/// was loaded. The cap is actually enforced by
+		/// EmailSwitchDbService.TryReserveVerificationAttempt, which claims a slot server side before
+		/// the guess is checked. Deciding here and incrementing afterwards is a check-then-act race -
+		/// concurrent guesses all passed this test before any of them had been counted.
 		/// </summary>
 		internal bool HasNotExpired(byte maximumFailedAttemptsToVerify) =>
-			FailedVerificationAttemptsUTC.Count < maximumFailedAttemptsToVerify &&
+			AttemptsClaimed < maximumFailedAttemptsToVerify &&
 			SuccessfullyVerifiedTimestampUTC == null &&
 			DateTime.UtcNow < ExpiryTimeUTC;
+
+		/// <summary>
+		/// The larger of the reservation counter and the audit list. A session written before
+		/// <see cref="VerificationAttemptsCount"/> existed carries its attempts only in the list, so
+		/// taking the maximum keeps the cap intact across the upgrade rather than handing every
+		/// in-flight session a fresh set of guesses.
+		/// </summary>
+		internal int AttemptsClaimed => Math.Max(VerificationAttemptsCount, FailedVerificationAttemptsUTC.Count);
 	}
 }

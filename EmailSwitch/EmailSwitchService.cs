@@ -157,22 +157,39 @@ namespace EmailSwitch
 				}
 				else
 				{
-					expired = false;
+					// GetLatestSession only discovers which session to guess against; the value it
+					// returns is already stale by the time it arrives. The slot is claimed server side
+					// instead, before the guess is checked, so concurrent guesses cannot all pass a cap
+					// that none of them has yet been counted against.
+					var reserved = await _emailSwitchDbService.TryReserveVerificationAttempt(
+						session.SessionId,
+						_emailSwitchInitializer.EmailControls.MaximumFailedAttemptsToVerify);
 
-					// ConsumeAndValidate claims the token in a single hash-matched delete, so two
-					// concurrent requests holding the same correct OTP cannot both succeed. A wrong
-					// guess leaves the token in place for the legitimate holder to still use.
-					verified = await _tokenService.ConsumeAndValidate(session.SessionId, token: OTP);
-					if (verified)
+					if (reserved is null)
 					{
-						await _emailSwitchDbService.RegisterSuccessfulVerification(session.SessionId);
+						// Out of attempts, or the session was verified or expired between the two
+						// reads. Either way there is nothing left to guess against, so the token is
+						// never touched.
+						_logger.LogInformation("No verification attempt left: Unable to verify OTP for {Email} with SessionId: {SessionId}", email, session.SessionId);
 					}
 					else
 					{
-						// Counted server side in one atomic operation. Reading the session, appending
-						// to it and replacing the whole document lost concurrent failures, which is
-						// exactly how a caller would defeat the attempt cap.
-						await _emailSwitchDbService.RegisterFailedVerificationAttempt(session.SessionId);
+						expired = false;
+
+						// ConsumeAndValidate claims the token in a single hash-matched delete, so two
+						// concurrent requests holding the same correct OTP cannot both succeed. A wrong
+						// guess leaves the token in place for the legitimate holder to still use.
+						verified = await _tokenService.ConsumeAndValidate(session.SessionId, token: OTP);
+						if (verified)
+						{
+							await _emailSwitchDbService.RegisterSuccessfulVerification(session.SessionId);
+						}
+						else
+						{
+							// Audit only - the attempt itself was already claimed above. Kept as an
+							// atomic $push so parallel failures are each recorded.
+							await _emailSwitchDbService.RegisterFailedVerificationAttempt(session.SessionId);
+						}
 					}
 				}
 			}
