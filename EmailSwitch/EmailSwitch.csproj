@@ -18,7 +18,7 @@
 	<ItemGroup>
 		<PackageReference Include="HumanLanguages" Version="11.0.0" />
 		<PackageReference Include="SendGrid" Version="9.29.3" />
-		<PackageReference Include="SMSwitch" Version="10.3.1" />
+		<PackageReference Include="SMSwitch" Version="10.4.0" />
 		<PackageReference Include="MongoDbTokenManager" Version="10.3.0" />
 		<PackageReference Include="uSignIn.CommonSettings" Version="10.2.0" />
 	</ItemGroup>
