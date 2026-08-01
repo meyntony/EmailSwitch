@@ -4,6 +4,7 @@ using EmailSwitch.Common.Logo;
 using EmailSwitch.Database.DTOs;
 using HumanLanguages;
 using Microsoft.Extensions.Logging;
+using MongoDB.Bson;
 using MongoDB.Driver;
 using MongoDbService;
 using MongoDbTokenManager;
@@ -25,6 +26,9 @@ namespace EmailSwitch.Database
 		/// has to be large enough to cover stale rows that have not yet aged out of the filter.
 		/// </summary>
 		private const int MaximumCandidateSessions = 16;
+
+		private const int IndexOptionsConflictErrorCode = 85;
+		private const int IndexKeySpecsConflictErrorCode = 86;
 
 		private readonly SemaphoreSlim _indexGate = new(1, 1);
 		private volatile bool _indexReady;
@@ -48,12 +52,9 @@ namespace EmailSwitch.Database
 		}
 
 		/// <summary>
-		/// Creates the session lookup index on first use. Deferred out of the constructor so building
-		/// the DI container does not block on a network round trip, and a failed attempt is not
-		/// cached so a transient outage does not leave the collection permanently unindexed.
-		///
-		/// No TTL index here on purpose: the README documents these sessions as an audit record, so
-		/// they are kept rather than reaped.
+		/// Creates the session indexes on first use. Deferred out of the constructor so building the
+		/// DI container does not block on a network round trip, and a failed attempt is not cached so
+		/// a transient outage does not leave the collection permanently unindexed.
 		/// </summary>
 		private async Task EnsureSessionIndex()
 		{
@@ -79,6 +80,7 @@ namespace EmailSwitch.Database
 						.Descending(session => session.ExpiryTimeUTC));
 
 				await _emailSwitchSessionCollection.Indexes.CreateOneAsync(indexModel);
+				await EnsureRetentionIndex();
 				_indexReady = true;
 			}
 			catch (Exception exception)
@@ -97,6 +99,81 @@ namespace EmailSwitch.Database
 			{
 				_indexGate.Release();
 			}
+		}
+
+		/// <summary>
+		/// Creates the TTL index that reaps sessions <c>SessionRetentionDays</c> after they expire.
+		/// Sessions hold the verified address, so keeping them forever is a storage-limitation problem
+		/// as much as a disk one; a retention of zero or less is honoured as an explicit choice to
+		/// keep them and simply creates no index.
+		///
+		/// Separate from the lookup index because a TTL index cannot be compound. Left unnamed so the
+		/// server derives ExpiryTimeUTC_1 - requesting the same key pattern under a different name is
+		/// itself a conflict later.
+		/// </summary>
+		private async Task EnsureRetentionIndex()
+		{
+			var sessionRetentionDays = _emailSwitchInitializer.EmailControls.SessionRetentionDays;
+
+			if (sessionRetentionDays <= 0)
+			{
+				return;
+			}
+
+			var indexModel = new CreateIndexModel<EmailSwitchSession>(
+				Builders<EmailSwitchSession>.IndexKeys.Ascending(session => session.ExpiryTimeUTC),
+				new CreateIndexOptions { ExpireAfter = TimeSpan.FromDays(sessionRetentionDays) });
+
+			try
+			{
+				await _emailSwitchSessionCollection.Indexes.CreateOneAsync(indexModel);
+			}
+			catch (MongoCommandException exception) when (exception.Code is IndexOptionsConflictErrorCode or IndexKeySpecsConflictErrorCode)
+			{
+				// The index exists with a different expireAfterSeconds. MongoDB refuses to recreate
+				// it, so amend it in place - otherwise changing SessionRetentionDays, which the README
+				// documents doing, would throw on every call.
+				await AmendRetentionOnExistingIndex(sessionRetentionDays);
+			}
+		}
+
+		/// <summary>
+		/// Points collMod at whatever the existing single-field ExpiryTimeUTC index is actually
+		/// called, because collMod addresses an index by name and fails on a name that is not there.
+		///
+		/// The single-key requirement matters: the compound lookup index also contains ExpiryTimeUTC,
+		/// and matching it here would put an expiry on the index the reads depend on and start
+		/// deleting sessions on the wrong schedule.
+		/// </summary>
+		private async Task AmendRetentionOnExistingIndex(int sessionRetentionDays)
+		{
+			using var cursor = await _emailSwitchSessionCollection.Indexes.ListAsync();
+			var indexes = await cursor.ToListAsync();
+
+			var existing = indexes.FirstOrDefault(index =>
+				index.TryGetValue("key", out var key)
+				&& key is BsonDocument keyDocument
+				&& keyDocument.ElementCount == 1
+				&& keyDocument.Contains(nameof(EmailSwitchSession.ExpiryTimeUTC)));
+
+			if (existing is null || !existing.TryGetValue("name", out var name))
+			{
+				// Nothing single-field on ExpiryTimeUTC to amend, so the conflict was about something
+				// else. Leave the collection alone rather than inventing an index.
+				_logger.LogWarning("Unable to apply a session retention of {SessionRetentionDays} days: no single-field {Field} index was found to amend.", sessionRetentionDays, nameof(EmailSwitchSession.ExpiryTimeUTC));
+				return;
+			}
+
+			await _emailSwitchSessionCollection.Database.RunCommandAsync<BsonDocument>(new BsonDocument
+			{
+				{ "collMod", _emailSwitchSessionCollection.CollectionNamespace.CollectionName },
+				{ "index", new BsonDocument
+					{
+						{ "name", name },
+						{ "expireAfterSeconds", TimeSpan.FromDays(sessionRetentionDays).TotalSeconds }
+					}
+				}
+			});
 		}
 
 		internal async Task<EmailSwitchSession?> GetOrCreateAndGetLatestSession(EmailIdentifier emailPendingVerification, MobileNumber[] verifiedMobileNumbers, EmailIdentifier[] verifiedEmails, HashSet<LanguageIsoCode> preferredLanguageIsoCodeList, UserAgent userAgent)
@@ -167,9 +244,9 @@ namespace EmailSwitch.Database
 		private FilterDefinition<EmailSwitchSession> Filter(EmailIdentifier emailPendingVerification) => Builders<EmailSwitchSession>.Filter.Eq(t => t.EmailId, emailPendingVerification.ToString());
 
 		/// <summary>
-		/// Not an upsert. The session is always inserted by GetOrCreateAndGetLatestSession before
-		/// this runs, so upserting could only ever resurrect a document that something else had
-		/// deliberately removed.
+		/// Not an upsert. The session is always inserted by GetOrCreateAndGetLatestSession before this
+		/// runs, so a filter that matches nothing means the session has since been reaped by the
+		/// retention TTL index - and a reaped session must stay reaped rather than be written back.
 		/// </summary>
 		internal async Task UpdateSession(EmailSwitchSession session)
 		{

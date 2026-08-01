@@ -11,6 +11,13 @@ namespace EmailSwitch.Common
 		/// </summary>
 		internal const int MinimumSessionTimeoutInSeconds = 30;
 
+		/// <summary>
+		/// Days a session is kept after expiry when nothing is configured. Sessions carry the
+		/// verified address, so an audit trail that grows without bound is a storage-limitation
+		/// problem, not just a disk one.
+		/// </summary>
+		internal const int DefaultSessionRetentionDays = 90;
+
 		private const string ControlsSection = "EmailSwitchSettings:Controls";
 
 		public readonly EmailControls EmailControls;
@@ -36,8 +43,44 @@ namespace EmailSwitch.Common
 				MaximumFailedAttemptsToVerify = byte.TryParse(emailControlsConfig["MaximumFailedAttemptsToVerify"], out byte maximumFailedAttemptsToVerify) ? maximumFailedAttemptsToVerify : (byte)3,
 				SessionTimeoutInSeconds = sessionTimeoutInSeconds,
 				MaxRoundRobinAttempts = byte.TryParse(emailControlsConfig["MaxRoundRobinAttempts"], out byte maxRoundRobinAttempts) ? maxRoundRobinAttempts : (byte)1,
+				SessionRetentionDays = ReadSessionRetentionDays(emailControlsConfig, logger),
 				Priority = GetPriority(emailControlsConfig.GetRequiredSection("Priority").Get<string[]>() ?? [], logger)
 			};
+		}
+
+		/// <summary>
+		/// Unlike the other controls this never fails startup. Zero or less is a legitimate operator
+		/// choice - keep the audit trail indefinitely and prune it some other way - rather than a
+		/// misconfiguration, so it is logged and honoured.
+		/// </summary>
+		private static int ReadSessionRetentionDays(IConfigurationSection emailControlsConfig, ILogger logger)
+		{
+			var configured = emailControlsConfig["SessionRetentionDays"];
+
+			if (string.IsNullOrWhiteSpace(configured))
+			{
+				return DefaultSessionRetentionDays;
+			}
+
+			if (!int.TryParse(configured, out var sessionRetentionDays))
+			{
+				logger.LogWarning(
+					"{ControlsSection}:SessionRetentionDays is not a number, falling back to {DefaultSessionRetentionDays} days.",
+					ControlsSection,
+					DefaultSessionRetentionDays);
+
+				return DefaultSessionRetentionDays;
+			}
+
+			if (sessionRetentionDays <= 0)
+			{
+				logger.LogWarning(
+					"{ControlsSection}:SessionRetentionDays is {SessionRetentionDays}, so sessions are kept indefinitely and the collection will grow without bound.",
+					ControlsSection,
+					sessionRetentionDays);
+			}
+
+			return sessionRetentionDays;
 		}
 
 		private static HashSet<EmailProvider> GetPriority(string[] configuredProviders, ILogger logger)

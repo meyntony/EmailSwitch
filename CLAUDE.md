@@ -81,8 +81,13 @@ Non-obvious, and each of these has caused a real bug:
   `RegisterSuccessfulVerification`, which are a `$push` and a filtered `UpdateOne`.
   This matters more than it used to: MongoDbTokenManager 10.2.0 deleted its own `MAXIMUM_ATTEMPTS = 5`,
   so EmailSwitch's cap is now the **only** guard on a six digit code.
-- **Sessions are never deleted.** They are the audit trail, so there is deliberately no TTL index. Do
-  not add one without deciding the retention question first.
+- **Sessions are reaped by a TTL index** `SessionRetentionDays` after they expire (default 90; ≤ 0
+  disables it and keeps them forever). It is a **second, single-field** index on `ExpiryTimeUTC`,
+  because a TTL index cannot be compound. When amending it, the matcher must require
+  `key.ElementCount == 1` or it will find the compound lookup index — which also contains
+  `ExpiryTimeUTC` — and put an expiry on the index every read depends on. Changing the setting is
+  applied with `collMod`, since MongoDB refuses to recreate an index with different options; the
+  same pattern, and the same bug, exist in MongoDbTokenManager (`619679b`).
 - **The `Tokens` collection is shared** with everything else using MongoDbTokenManager against the same
   database, including SMSwitch. Dropping it invalidates their in-flight OTPs too.
 - Token documents written by MongoDbTokenManager **10.0.0 cannot be deserialised by 10.2.0+** — expiry

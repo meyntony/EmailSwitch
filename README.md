@@ -1,4 +1,4 @@
-# EmailSwitch
+﻿# EmailSwitch
 
 **EmailSwitch** is an open-source C# class library that sends and verifies email one-time
 passcodes (OTPs). You call `SendOTP` to email someone a code and `VerifyOTP` to check it; EmailSwitch
@@ -36,8 +36,9 @@ Verification is atomic: of two concurrent requests submitting the same correct c
 succeeds. A wrong guess leaves the code usable, so an attacker cannot lock the legitimate holder out
 by guessing.
 
-Sessions are kept indefinitely as an audit record — there is no TTL index on them. Expired *tokens*
-are cleaned up by MongoDbTokenManager separately.
+Sessions are kept as an audit record for `SessionRetentionDays` after they expire — 90 days by
+default — and are then removed automatically by a MongoDB TTL index. Expired *tokens* are cleaned up
+by MongoDbTokenManager separately.
 
 ## Getting started
 
@@ -211,6 +212,7 @@ for the actual send.
 | `EmailSwitchSettings:Controls:MaxRoundRobinAttempts` | no | `1` | Times the priority list repeats. `Priority.Count × MaxRoundRobinAttempts` is the total emails one session may send. |
 | `EmailSwitchSettings:Controls:MaximumFailedAttemptsToVerify` | no | `3` | Wrong guesses before the session dies. |
 | `EmailSwitchSettings:Controls:SessionTimeoutInSeconds` | no | `240` | **Minimum 30.** Below that, startup fails. |
+| `EmailSwitchSettings:Controls:SessionRetentionDays` | no | `90` | Days a session is kept after it expires, then removed by a TTL index. `0` or less keeps them indefinitely. |
 | `EmailSwitchSettings:SendGrid:From` | if SendGrid used | — | Sender address; also used as reply-to. |
 | `EmailSwitchSettings:SendGrid:Password` | if SendGrid used | — | Your SendGrid **API key**. Keep it in a secret store. |
 
@@ -251,8 +253,10 @@ queue falls through to a real provider if one is configured after it.
 - **Sends are budgeted.** Once `Priority.Count × MaxRoundRobinAttempts` attempts are spent,
   `SendOTP` returns `IsSent = false`. The code already delivered stays verifiable until the session
   expires.
-- **Sessions are never deleted.** They are the audit trail, so the collection grows. Prune it
-  yourself if you need a retention policy.
+- **Sessions are the audit trail and expire on their own schedule.** `SessionRetentionDays` (90 by
+  default) governs how long they survive past expiry. Sessions hold the verified email address, so
+  set this to whatever your retention policy allows rather than leaving it unbounded. Note a TTL
+  index gives time-based expiry, not erasure of one person's data on request.
 - **The logo endpoint is public** and keyed by session id, so a request to it reveals that a session
   exists. It also records each render, which doubles as an open-tracking signal.
 

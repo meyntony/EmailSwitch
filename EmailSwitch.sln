@@ -1,12 +1,13 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio Version 17
-VisualStudioVersion = 17.8.34511.84
+# Visual Studio Version 18
+VisualStudioVersion = 18.6.11806.211 stable
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "EmailSwitch", "EmailSwitch\EmailSwitch.csproj", "{FB7E548B-C484-4DF5-A572-37ACF8D26C5A}"
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "SolutionFiles", "SolutionFiles", "{9DFCE29A-A519-4C74-899E-D5CE590286A1}"
 	ProjectSection(SolutionItems) = preProject
+		CLAUDE.md = CLAUDE.md
 		LICENSE = LICENSE
 		README.md = README.md
 		.github\workflows\release.yml = .github\workflows\release.yml
