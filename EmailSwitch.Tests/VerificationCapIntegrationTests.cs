@@ -3,7 +3,6 @@ using EmailSwitch.Database.DTOs;
 using Microsoft.Extensions.DependencyInjection;
 using MongoDB.Driver;
 using SMSwitch.Common.DTOs;
-using System.Text.RegularExpressions;
 
 namespace EmailSwitch.Tests
 {
@@ -21,7 +20,17 @@ namespace EmailSwitch.Tests
 		private const byte MaximumFailedAttemptsToVerify = 3;
 		private static readonly EmailIdentifier Email = "user@example.com";
 
-		private sealed record Harness(ServiceProvider Provider, IMongoDatabase Database);
+		private sealed record Harness(ServiceProvider Provider, IMongoDatabase Database, TestHost.LogCapture Log)
+		{
+			public EmailSwitchService Service => Provider.GetRequiredService<EmailSwitchService>();
+
+			/// <summary>
+			/// The code as DevConsole wrote it to the log - the way a developer reads it. Deliberately
+			/// not read back out of the session: the rendered email is retired once the send budget is
+			/// spent, which with one provider is immediately after the first send.
+			/// </summary>
+			public string DeliveredCode => Log.CapturedOtp;
+		}
 
 		private static async Task WithHarness(Func<Harness, Task> body)
 		{
@@ -32,12 +41,13 @@ namespace EmailSwitch.Tests
 			settings["MongoDbSettings:DatabaseName"] = databaseName;
 			settings["EmailSwitchSettings:Controls:MaximumFailedAttemptsToVerify"] = MaximumFailedAttemptsToVerify.ToString();
 
-			using var provider = TestHost.Build(settings);
+			var log = new TestHost.LogCapture();
+			using var provider = TestHost.Build(settings, loggerProvider: log);
 			var client = new MongoClient(connectionString);
 
 			try
 			{
-				await body(new Harness(provider, client.GetDatabase(databaseName)));
+				await body(new Harness(provider, client.GetDatabase(databaseName), log));
 			}
 			finally
 			{
@@ -52,10 +62,6 @@ namespace EmailSwitch.Tests
 				.Find(Builders<EmailSwitchSession>.Filter.Eq(session => session.EmailId, Email.ToString()))
 				.FirstOrDefaultAsync();
 
-		/// <summary>Reads the real code back out of the rendered email, as DevConsole logs it.</summary>
-		private static string CodeFrom(EmailSwitchSession session) =>
-			Regex.Match(session.SendOTPEmail!.PlainTextContent, @"Verification Code: (\d+)").Groups[1].Value;
-
 		/// <summary>
 		/// The regression. Sixty wrong guesses fired at once must consume the cap and no more, and the
 		/// correct code must then be refused - the session is spent, exactly as it would be after three
@@ -66,10 +72,11 @@ namespace EmailSwitch.Tests
 		{
 			await WithHarness(async harness =>
 			{
-				var emailSwitchService = harness.Provider.GetRequiredService<EmailSwitchService>();
+				var emailSwitchService = harness.Service;
 
 				Assert.True((await emailSwitchService.SendOTP(Email, [], [], [], UserAgent.WebBrowser)).IsSent);
-				var correctCode = CodeFrom(await LoadSession(harness));
+				var correctCode = harness.DeliveredCode;
+				Assert.Equal(6, correctCode.Length);
 
 				const int concurrentGuesses = 60;
 				var responses = await Task.WhenAll(Enumerable
@@ -99,10 +106,10 @@ namespace EmailSwitch.Tests
 		{
 			await WithHarness(async harness =>
 			{
-				var emailSwitchService = harness.Provider.GetRequiredService<EmailSwitchService>();
+				var emailSwitchService = harness.Service;
 
 				await emailSwitchService.SendOTP(Email, [], [], [], UserAgent.WebBrowser);
-				var correctCode = CodeFrom(await LoadSession(harness));
+				var correctCode = harness.DeliveredCode;
 
 				for (var guess = 0; guess < MaximumFailedAttemptsToVerify - 1; guess++)
 				{
@@ -122,10 +129,10 @@ namespace EmailSwitch.Tests
 		{
 			await WithHarness(async harness =>
 			{
-				var emailSwitchService = harness.Provider.GetRequiredService<EmailSwitchService>();
+				var emailSwitchService = harness.Service;
 
 				await emailSwitchService.SendOTP(Email, [], [], [], UserAgent.WebBrowser);
-				var correctCode = CodeFrom(await LoadSession(harness));
+				var correctCode = harness.DeliveredCode;
 
 				Assert.True((await emailSwitchService.VerifyOTP(Email, correctCode)).Verified);
 

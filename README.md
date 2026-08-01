@@ -40,6 +40,11 @@ Sessions are kept as an audit record for `SessionRetentionDays` after they expir
 default — and are then removed automatically by a MongoDB TTL index. Expired *tokens* are cleaned up
 by MongoDbTokenManager separately.
 
+The rendered email is held on the session only while a resend could still need it, and is dropped as
+soon as the code is verified or the send budget is spent. It carries the code in cleartext, so it
+must not sit in the audit record for the retention period — what survives is the session's
+timestamps and its send attempts, not the code or the contact details the body listed.
+
 ## Getting started
 
 ### 1. Install
@@ -257,6 +262,13 @@ queue falls through to a real provider if one is configured after it.
   default) governs how long they survive past expiry. Sessions hold the verified email address, so
   set this to whatever your retention policy allows rather than leaving it unbounded. Note a TTL
   index gives time-based expiry, not erasure of one person's data on request.
+- **The code is not kept.** MongoDbTokenManager stores only a hash of it, and the rendered email that
+  contains it in cleartext is dropped as soon as it can no longer be needed — on verification, or
+  once the send budget is spent. It is still readable in the sessions collection for the few minutes
+  in between, so treat that collection as holding secrets even though nothing retains them.
+- **Read the code off the log, not the database,** if you are scripting against `DevConsole`. It is
+  no longer recoverable from the stored session once the budget is spent, which with a single
+  provider is immediately after the first send.
 - **The logo endpoint is public** and keyed by session id, so a request to it reveals that a session
   exists. It also records each render, which doubles as an open-tracking signal.
 

@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using MongoDbService;
 using MongoDbTokenManager;
+using System.Text.RegularExpressions;
 
 namespace EmailSwitch.Tests
 {
@@ -54,20 +55,70 @@ namespace EmailSwitch.Tests
 			return settings;
 		}
 
-		internal static ServiceProvider Build(Dictionary<string, string?> settings, string environmentName = "Development")
+		internal static ServiceProvider Build(Dictionary<string, string?> settings, string environmentName = "Development", ILoggerProvider? loggerProvider = null)
 		{
 			var configuration = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
 
 			var services = new ServiceCollection();
 			services.AddSingleton<IConfiguration>(configuration);
 			services.AddSingleton<IHostEnvironment>(new TestHostEnvironment(environmentName));
-			services.AddLogging(builder => builder.AddProvider(NullLoggerProvider.Instance));
+			services.AddLogging(builder => builder.AddProvider(loggerProvider ?? NullLoggerProvider.Instance));
 
 			services.AddMongoDbServices();
 			services.AddMongoDbTokenServices();
 			services.AddEmailSwitchServices();
 
 			return services.BuildServiceProvider();
+		}
+
+		/// <summary>
+		/// Captures log output so a test can read the verification code the way a developer running on
+		/// DevConsole does - off the console.
+		///
+		/// Tests used to read the code back out of the stored session instead. That stopped working,
+		/// correctly, once the rendered email began being retired as soon as it could no longer be
+		/// needed: the cleartext code is no longer sitting in the database to be read. Going through
+		/// the log keeps these tests on the path a developer actually uses, and independent of where
+		/// the code is or is not persisted.
+		/// </summary>
+		internal sealed class LogCapture : ILoggerProvider
+		{
+			private readonly List<string> _messages = [];
+
+			public ILogger CreateLogger(string categoryName) => new CapturingLogger(_messages);
+
+			/// <summary>The six digit code DevConsole wrote, or empty if it never logged one.</summary>
+			public string CapturedOtp
+			{
+				get
+				{
+					lock (_messages)
+					{
+						return _messages
+							.Select(message => Regex.Match(message, @"Verification Code: (\d+)"))
+							.Where(match => match.Success)
+							.Select(match => match.Groups[1].Value)
+							.LastOrDefault() ?? string.Empty;
+					}
+				}
+			}
+
+			public void Dispose() { }
+
+			private sealed class CapturingLogger(List<string> messages) : ILogger
+			{
+				public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+				public bool IsEnabled(LogLevel logLevel) => true;
+
+				public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+				{
+					lock (messages)
+					{
+						messages.Add(formatter(state, exception));
+					}
+				}
+			}
 		}
 
 		private sealed class TestHostEnvironment : IHostEnvironment

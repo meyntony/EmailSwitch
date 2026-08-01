@@ -74,13 +74,34 @@ Non-obvious, and each of these has caused a real bug:
   serialise to.
 - **`EmailProvider` values are persisted by number** inside `EmailProvidersQueue` and are pinned
   explicitly. Append new members; renumbering reinterprets every stored session.
-- **Mutate server-side, never read-modify-write.** `FailedVerificationAttemptsUTC` is the brute-force
-  limiter. A read-mutate-replace cycle loses increments under concurrency — measured at 25 concurrent
-  failures recorded as 2, making the real ceiling request concurrency rather than
-  `MaximumFailedAttemptsToVerify`. Use `EmailSwitchDbService.RegisterFailedVerificationAttempt` /
-  `RegisterSuccessfulVerification`, which are a `$push` and a filtered `UpdateOne`.
-  This matters more than it used to: MongoDbTokenManager 10.2.0 deleted its own `MAXIMUM_ATTEMPTS = 5`,
-  so EmailSwitch's cap is now the **only** guard on a six digit code.
+- **Mutate server-side, never read-modify-write.** A read-mutate-replace cycle loses increments under
+  concurrency — measured at 25 concurrent failures recorded as 2. Every write to a session is a
+  targeted `UpdateOne`: `RegisterFailedVerificationAttempt`, `RegisterSuccessfulVerification`,
+  `RegisterRenderRequest`, `RegisterSendAttempts`. There is deliberately **no whole-document
+  replace**. `SendOTP` used to have one, and because it read the session before a provider call and
+  wrote it back after, it reverted anything recorded in that window — including the brute-force
+  counter. Do not reintroduce an `UpdateSession(session)`.
+- **The attempt cap is claimed before the guess is checked, not counted after.**
+  `TryReserveVerificationAttempt` is a `findAndModify` that tests the limit and `$inc`s
+  `VerificationAttemptsCount` in one operation; a refused claim never reaches `ConsumeAndValidate`.
+  Reading the session, testing `HasNotExpired` and counting afterwards is check-then-act — measured
+  at **16 concurrent guesses admitted against a cap of 3** on a local single-node MongoDB, and the
+  window scales with provider latency. `HasNotExpired` is advisory only; it describes the session as
+  loaded and cannot enforce anything. This is the **only** guard on a six digit code since
+  MongoDbTokenManager 10.2.0 deleted its own `MAXIMUM_ATTEMPTS = 5`.
+- **`VerificationAttemptsCount` and `FailedVerificationAttemptsUTC` are not the same thing.** The
+  first is the rate-limit reservation, claimed by every guess including a correct one. The second is
+  the audit trail of guesses that were actually wrong. Collapsing them back together means either
+  recording a success as a failure or giving the reservation back. Both the cap filter and
+  `AttemptsClaimed` take the *maximum* of the two, so sessions written before the counter existed
+  stay capped by their audit list across the upgrade.
+- **The rendered email is retired, and `SendOTPEmail` is nullable because of it.** It carries the code
+  in cleartext, so it is `$unset` on successful verification and when the send budget is spent.
+  MongoDbTokenManager stores only a hash; keeping the body next to it defeated that, and retention
+  kept a four-minute code readable for 90 days along with the recipient's verified numbers and
+  emails. `required` was dropped with it — the BSON deserializer does not enforce `required`, so an
+  unset element would otherwise hand back null through a non-nullable property. Tests that need the
+  code read it off the DevConsole log via `TestHost.LogCapture`, not out of the session.
 - **Sessions are reaped by a TTL index** `SessionRetentionDays` after they expire (default 90; ≤ 0
   disables it and keeps them forever). It is a **second, single-field** index on `ExpiryTimeUTC`,
   because a TTL index cannot be compound. When amending it, the matcher must require

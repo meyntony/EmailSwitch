@@ -268,8 +268,24 @@ namespace EmailSwitch.Database
 					Builders<EmailSwitchSession>.Update.PushEach(session => session.SentAttempts, sentAttempts));
 			}
 
+			if (remainingBudget.Count == 0)
+			{
+				// Nothing can send this again, so the cleartext code has no further use. Inferred from
+				// the budget rather than asked for by the caller, so it cannot be forgotten at a call
+				// site. The session stays verifiable - that goes through the token, not the body.
+				update = Builders<EmailSwitchSession>.Update.Combine(update, RetireRenderedEmail);
+			}
+
 			await _emailSwitchSessionCollection.UpdateOneAsync(Filter(sessionId), update);
 		}
+
+		/// <summary>
+		/// Drops the rendered email, and with it the cleartext verification code and the recipient's
+		/// verified contact details. See <see cref="EmailSwitchSession.SendOTPEmail"/> for why it must
+		/// not outlive its usefulness.
+		/// </summary>
+		private static UpdateDefinition<EmailSwitchSession> RetireRenderedEmail =>
+			Builders<EmailSwitchSession>.Update.Unset(session => session.SendOTPEmail);
 
 		/// <summary>
 		/// Claims one verification attempt against this session, or returns null if there is no slot
@@ -339,9 +355,10 @@ namespace EmailSwitch.Database
 		}
 
 		/// <summary>
-		/// Stamps the session verified, only if it has not been already. ConsumeAndValidate already
-		/// guarantees a single winner for the token itself; the condition here keeps the stored
-		/// timestamp honest if that ever changes.
+		/// Stamps the session verified, only if it has not been already, and retires the rendered
+		/// email in the same operation - a spent code has no reason to stay readable for the retention
+		/// period. ConsumeAndValidate already guarantees a single winner for the token itself; the
+		/// condition here keeps the stored timestamp honest if that ever changes.
 		/// </summary>
 		internal async Task RegisterSuccessfulVerification(string sessionId)
 		{
@@ -349,7 +366,9 @@ namespace EmailSwitch.Database
 				Builders<EmailSwitchSession>.Filter.And(
 					Filter(sessionId),
 					Builders<EmailSwitchSession>.Filter.Eq(session => session.SuccessfullyVerifiedTimestampUTC, null)),
-				Builders<EmailSwitchSession>.Update.Set(session => session.SuccessfullyVerifiedTimestampUTC, DateTime.UtcNow));
+				Builders<EmailSwitchSession>.Update.Combine(
+					Builders<EmailSwitchSession>.Update.Set(session => session.SuccessfullyVerifiedTimestampUTC, DateTime.UtcNow),
+					RetireRenderedEmail));
 		}
 
 		internal async Task RegisterRenderRequest(string id)

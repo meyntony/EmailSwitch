@@ -7,7 +7,6 @@ using EmailSwitch.Services.SendGrid;
 using Microsoft.Extensions.DependencyInjection;
 using MongoDB.Driver;
 using SMSwitch.Common.DTOs;
-using System.Text.RegularExpressions;
 
 namespace EmailSwitch.Tests
 {
@@ -96,8 +95,10 @@ namespace EmailSwitch.Tests
 
 		/// <summary>
 		/// Send and verify with no SendGrid account, against a real MongoDB - the flow a developer
-		/// gets from the appsettings.Development.json snippet in the README. The code is read back
-		/// out of the rendered email, which is the same text DevConsole writes to the log.
+		/// gets from the appsettings.Development.json snippet in the README. The code is read off the
+		/// captured log, which is exactly where a developer reads it; it is deliberately no longer
+		/// recoverable from the stored session, since the rendered email is retired as soon as the
+		/// send budget is spent.
 		/// </summary>
 		[Fact]
 		public async Task An_otp_can_be_sent_and_verified_end_to_end_with_no_email_account()
@@ -108,7 +109,8 @@ namespace EmailSwitch.Tests
 			var settings = TestHost.BaseSettings(connectionString).WithPriority("DevConsole");
 			settings["MongoDbSettings:DatabaseName"] = databaseName;
 
-			using var provider = TestHost.Build(settings);
+			var log = new TestHost.LogCapture();
+			using var provider = TestHost.Build(settings, loggerProvider: log);
 			var client = new MongoClient(connectionString);
 
 			try
@@ -119,13 +121,16 @@ namespace EmailSwitch.Tests
 				var sendResponse = await emailSwitchService.SendOTP(email, [], [], [], UserAgent.WebBrowser);
 				Assert.True(sendResponse.IsSent);
 
+				var otp = log.CapturedOtp;
+				Assert.Equal(6, otp.Length);
+
+				// The budget was one slot, so the cleartext code is already gone from the session.
 				var session = await client.GetDatabase(databaseName)
 					.GetCollection<EmailSwitchSession>(nameof(EmailSwitchSession))
 					.Find(Builders<EmailSwitchSession>.Filter.Eq(s => s.EmailId, email.ToString()))
 					.FirstOrDefaultAsync(TestContext.Current.CancellationToken);
 
-				var otp = Regex.Match(session.SendOTPEmail.PlainTextContent, @"Verification Code: (\d+)").Groups[1].Value;
-				Assert.Equal(6, otp.Length);
+				Assert.Null(session.SendOTPEmail);
 
 				var verifyResponse = await emailSwitchService.VerifyOTP(email, otp);
 				Assert.True(verifyResponse.Verified);

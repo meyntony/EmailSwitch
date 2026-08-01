@@ -74,6 +74,20 @@ namespace EmailSwitch
 					};
 				}
 
+				// The rendered email is retired once the code is verified or the budget is spent, so a
+				// live session with slots left should always still carry one. Checked rather than
+				// assumed: the field is nullable precisely because the database can have dropped it,
+				// and dereferencing it here would fail mid-send rather than reporting a failed send.
+				if (session.SendOTPEmail is null)
+				{
+					_logger.LogCritical("Session {SessionId} has no rendered email left to send to {Email}", session.SessionId, email);
+					return new EmailSwitchResponseSendOTP()
+					{
+						IsSent = false,
+						ExpiryDateTimeOffset = session.ExpiryTimeUTC
+					};
+				}
+
 				// Accumulated in memory and written once at the end. The session document is never
 				// replaced wholesale, so attempts have to arrive as a $push rather than as a field of
 				// a document read before the provider call.

@@ -125,6 +125,84 @@ namespace EmailSwitch.Tests
 			Assert.Equal(concurrentSends, reloaded.SentAttempts.Count);
 		}
 
+		// ------------------------------------------------------------ retiring the cleartext code
+
+		/// <summary>
+		/// MongoDbTokenManager stores only a hash of the code. Keeping the rendered email - which
+		/// carries the code in cleartext, plus the recipient's verified numbers and emails - defeated
+		/// that, and the retention TTL kept it for 90 days after a four minute session.
+		/// </summary>
+		[Fact]
+		public async Task Verifying_a_session_retires_the_rendered_email()
+		{
+			await using var fixture = new EmailSwitchIntegrationFixture();
+			var session = await CreateSession(fixture);
+			Assert.NotNull((await Reload(fixture, session!.SessionId)).SendOTPEmail);
+
+			await fixture.DbService.RegisterSuccessfulVerification(session.SessionId);
+
+			var reloaded = await Reload(fixture, session.SessionId);
+			Assert.Null(reloaded.SendOTPEmail);
+			// The rest of the audit record survives.
+			Assert.NotNull(reloaded.SuccessfullyVerifiedTimestampUTC);
+			Assert.Equal(session.SessionId, reloaded.SessionId);
+			Assert.Equal(session.EmailId, reloaded.EmailId);
+		}
+
+		/// <summary>Nothing can send it again, so the code has no further use.</summary>
+		[Fact]
+		public async Task Spending_the_send_budget_retires_the_rendered_email()
+		{
+			await using var fixture = new EmailSwitchIntegrationFixture();
+			var session = await CreateSession(fixture);
+
+			await fixture.DbService.RegisterSendAttempts(
+				session!.SessionId,
+				new Queue<EmailProvider>(),
+				[new AttemptDetailsSendOTP(DateTime.UtcNow, EmailProvider.SendGrid, true)]);
+
+			var reloaded = await Reload(fixture, session.SessionId);
+			Assert.Null(reloaded.SendOTPEmail);
+			Assert.Single(reloaded.SentAttempts);
+		}
+
+		/// <summary>
+		/// A budget with slots left means a resend is still possible, and a resend reuses the rendered
+		/// email - so it must survive until the budget is actually spent.
+		/// </summary>
+		[Fact]
+		public async Task A_send_that_leaves_budget_keeps_the_rendered_email()
+		{
+			await using var fixture = new EmailSwitchIntegrationFixture();
+			var session = await CreateSession(fixture);
+
+			await fixture.DbService.RegisterSendAttempts(
+				session!.SessionId,
+				new Queue<EmailProvider>([EmailProvider.SendGrid]),
+				[new AttemptDetailsSendOTP(DateTime.UtcNow, EmailProvider.SendGrid, true)]);
+
+			Assert.NotNull((await Reload(fixture, session.SessionId)).SendOTPEmail);
+		}
+
+		/// <summary>
+		/// A retired session must still deserialise. The element is gone from the document entirely,
+		/// and `required` would not have stopped the driver handing back null through a non-nullable
+		/// property - it is a compile-time construct the BSON layer does not enforce.
+		/// </summary>
+		[Fact]
+		public async Task A_session_whose_email_was_retired_still_loads()
+		{
+			await using var fixture = new EmailSwitchIntegrationFixture();
+			var session = await CreateSession(fixture);
+			await fixture.DbService.RegisterSendAttempts(session!.SessionId, new Queue<EmailProvider>(), []);
+
+			// Still returned for verification - that goes through the token, not the body.
+			var reloaded = await fixture.DbService.GetLatestSession(Email);
+
+			Assert.NotNull(reloaded);
+			Assert.Null(reloaded!.SendOTPEmail);
+		}
+
 		// ------------------------------------------------------------------ the attempt cap
 
 		/// <summary>
@@ -299,7 +377,8 @@ namespace EmailSwitch.Tests
 			Assert.NotNull(session);
 			// Null rather than empty: SendOTP reads that as "budget not built yet".
 			Assert.Null(session!.EmailProvidersQueue);
-			Assert.Contains("Verification Code", session.SendOTPEmail.PlainTextContent);
+			Assert.NotNull(session.SendOTPEmail);
+			Assert.Contains("Verification Code", session.SendOTPEmail!.PlainTextContent);
 		}
 
 		[Fact]

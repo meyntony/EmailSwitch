@@ -50,7 +50,25 @@ namespace EmailSwitch.Database.DTOs
 		/// </summary>
 		public int VerificationAttemptsCount { get; set; }
 
-		public required EmailContent SendOTPEmail { get; set; }
+		/// <summary>
+		/// The rendered email, which contains the verification code in cleartext.
+		///
+		/// Nullable because it is retired - <c>$unset</c> - as soon as it can no longer be needed: when
+		/// the session is verified, and when the send budget is spent. MongoDbTokenManager deliberately
+		/// stores only a hash of the code, and keeping the rendered body alongside it defeated that;
+		/// anyone able to read this collection from a backup, a replica or a restored snapshot could
+		/// read live codes directly. Retention made it worse, since a code valid for four minutes
+		/// otherwise sat here for <c>SessionRetentionDays</c> - 90 by default - along with the
+		/// recipient's verified mobile numbers and emails, which the same body embeds.
+		///
+		/// Retiring it costs nothing: verification goes through the token, not the body, and the audit
+		/// value of the session is in its timestamps and <see cref="SentAttempts"/>.
+		///
+		/// <c>required</c> was dropped with the nullability: it is a C# construct the BSON deserializer
+		/// does not enforce, so once the element is unset a reloaded session hands back null through
+		/// whatever type this is declared as. Better that the type admits it.
+		/// </summary>
+		public EmailContent? SendOTPEmail { get; set; }
 
 		/// <summary>
 		/// Whether this session can still have a code verified against it.

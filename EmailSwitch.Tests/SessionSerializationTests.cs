@@ -88,7 +88,8 @@ namespace EmailSwitch.Tests
 
 			Assert.Equal(session.SessionId, roundTripped.SessionId);
 			Assert.Equal(session.EmailId, roundTripped.EmailId);
-			Assert.Equal(session.SendOTPEmail.Subject, roundTripped.SendOTPEmail.Subject);
+			Assert.NotNull(roundTripped.SendOTPEmail);
+			Assert.Equal(session.SendOTPEmail!.Subject, roundTripped.SendOTPEmail!.Subject);
 			Assert.Equal(session.SendOTPEmail.HtmlContent, roundTripped.SendOTPEmail.HtmlContent);
 			Assert.Single(roundTripped.SentAttempts);
 			Assert.Equal(EmailProvider.SendGrid, roundTripped.SentAttempts[0].EmailProvider);
