@@ -25,6 +25,26 @@ namespace EmailSwitch.Database.DTOs
 		[BsonDateTimeOptions(Kind = DateTimeKind.Utc)]
 		public required DateTime ExpiryTimeUTC { get; init; }
 
+		/// <summary>
+		/// Holds <see cref="EmailId"/> while this session is the live one for that address, and is
+		/// unset once it no longer is. A sparse unique index on it makes creation atomic: two requests
+		/// racing to open a session for one address cannot both insert, so a user cannot be sent two
+		/// different codes and then find that one of them does not work.
+		///
+		/// It has to be released explicitly rather than inferred, because a unique index cannot
+		/// express "live" - liveness depends on <see cref="ExpiryTimeUTC"/> against the current time,
+		/// and a partialFilterExpression cannot reference now. Indexing unverified sessions instead
+		/// was measured to reject the successor a user is entitled to once the predecessor times out.
+		///
+		/// <c>[BsonIgnoreIfNull]</c> is load-bearing, not tidiness. A sparse index skips documents
+		/// where the field is <em>absent</em>, not where it is BSON null - so writing an explicit null
+		/// would put every such session into the unique index under the same key and let only one of
+		/// them exist at a time, across all addresses. Releasing the claim is a <c>$unset</c> for the
+		/// same reason.
+		/// </summary>
+		[BsonIgnoreIfNull]
+		public string? LiveClaimKey { get; set; }
+
 		public Queue<EmailProvider>? EmailProvidersQueue { get; set; }
 		public List<AttemptDetailsSendOTP> SentAttempts { get; set; } = [];
 

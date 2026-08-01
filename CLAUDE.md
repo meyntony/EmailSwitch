@@ -102,6 +102,15 @@ Non-obvious, and each of these has caused a real bug:
   emails. `required` was dropped with it — the BSON deserializer does not enforce `required`, so an
   unset element would otherwise hand back null through a non-nullable property. Tests that need the
   code read it off the DevConsole log via `TestHost.LogCapture`, not out of the session.
+- **One live session per address is enforced by a releasable claim, not by an index alone.**
+  `LiveClaimKey` holds the `EmailId` while the session is the live one, under a **sparse unique**
+  index; `ReleaseStaleClaim` `$unset`s it when the session is verified, timed out or out of attempts,
+  and those conditions must keep mirroring `GetLatestSession` exactly. A unique *partial* index on
+  unverified sessions is the obvious alternative and is **wrong** — measured against a real server, it
+  rejects with `DuplicateKey` the successor session a user is entitled to once the predecessor times
+  out, because `partialFilterExpression` cannot reference the current time. `[BsonIgnoreIfNull]` on
+  `LiveClaimKey` is load-bearing: a sparse index skips *absent* fields, not BSON nulls, so writing a
+  null would collide every released session under one key across all addresses.
 - **Sessions are reaped by a TTL index** `SessionRetentionDays` after they expire (default 90; ≤ 0
   disables it and keeps them forever). It is a **second, single-field** index on `ExpiryTimeUTC`,
   because a TTL index cannot be compound. When amending it, the matcher must require

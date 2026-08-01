@@ -20,6 +20,14 @@ namespace EmailSwitch.Tests
 			fixture.DbService.GetOrCreateAndGetLatestSession(
 				Email, [], [], [new LanguageIsoCode()], UserAgent.WebBrowser);
 
+		/// <summary>Moves a session's deadline into the past, as the clock eventually would.</summary>
+		private static Task ExpireSession(EmailSwitchIntegrationFixture fixture, string sessionId) =>
+			fixture.Database
+				.GetCollection<EmailSwitchSession>(nameof(EmailSwitchSession))
+				.UpdateOneAsync(
+					Builders<EmailSwitchSession>.Filter.Eq(session => session.SessionId, sessionId),
+					Builders<EmailSwitchSession>.Update.Set(session => session.ExpiryTimeUTC, DateTime.UtcNow.AddMinutes(-1)));
+
 		private static Task<EmailSwitchSession> Reload(EmailSwitchIntegrationFixture fixture, string sessionId) =>
 			fixture.Database
 				.GetCollection<EmailSwitchSession>(nameof(EmailSwitchSession))
@@ -123,6 +131,124 @@ namespace EmailSwitch.Tests
 			var reloaded = await Reload(fixture, session!.SessionId);
 
 			Assert.Equal(concurrentSends, reloaded.SentAttempts.Count);
+		}
+
+		// --------------------------------------------------------- one live session per address
+
+		/// <summary>
+		/// Find-then-insert with no uniqueness constraint: two concurrent first sends both found
+		/// nothing, both minted a code and both inserted. The user got two emails with two different
+		/// codes, and only the one GetLatestSession happened to return would ever verify.
+		/// </summary>
+		[Fact]
+		public async Task Concurrent_first_sends_open_exactly_one_session()
+		{
+			await using var fixture = new EmailSwitchIntegrationFixture();
+			// The claim index is created on first use, and this test is about what happens without a
+			// prior read, so make sure it exists before racing.
+			await fixture.DbService.GetLatestSession(Email);
+
+			var sessions = await Task.WhenAll(Enumerable.Range(0, 12).Select(_ => CreateSession(fixture)));
+
+			Assert.All(sessions, session => Assert.NotNull(session));
+			Assert.Single(sessions.Select(session => session!.SessionId).Distinct());
+		}
+
+		/// <summary>
+		/// The successor a user is entitled to once the previous session times out. A unique index
+		/// cannot express liveness, so the claim is released explicitly - and a version that forgot to
+		/// would lock the address out until the retention TTL removed the old session.
+		/// </summary>
+		[Fact]
+		public async Task A_new_session_can_be_opened_once_the_previous_one_expires()
+		{
+			await using var fixture = new EmailSwitchIntegrationFixture();
+			var first = await CreateSession(fixture);
+
+			// Time it out where it stands, which is what the clock would have done.
+			await ExpireSession(fixture, first!.SessionId);
+
+			var second = await CreateSession(fixture);
+
+			Assert.NotNull(second);
+			Assert.NotEqual(first.SessionId, second!.SessionId);
+		}
+
+		/// <summary>A verified session is finished, so the next send gets a session of its own.</summary>
+		[Fact]
+		public async Task A_new_session_can_be_opened_once_the_previous_one_is_verified()
+		{
+			await using var fixture = new EmailSwitchIntegrationFixture();
+			var first = await CreateSession(fixture);
+
+			await fixture.DbService.RegisterSuccessfulVerification(first!.SessionId);
+			var second = await CreateSession(fixture);
+
+			Assert.NotNull(second);
+			Assert.NotEqual(first.SessionId, second!.SessionId);
+		}
+
+		/// <summary>
+		/// Burning the attempts must still leave a way to ask for a new code, or a mistyped digit
+		/// would lock the address out until the old session timed out.
+		/// </summary>
+		[Fact]
+		public async Task A_new_session_can_be_opened_once_the_attempts_are_spent()
+		{
+			await using var fixture = new EmailSwitchIntegrationFixture(maximumFailedAttemptsToVerify: 3);
+			var first = await CreateSession(fixture);
+
+			for (var attempt = 0; attempt < 3; attempt++)
+			{
+				await fixture.DbService.TryReserveVerificationAttempt(first!.SessionId, 3);
+			}
+
+			var second = await CreateSession(fixture);
+
+			Assert.NotNull(second);
+			Assert.NotEqual(first!.SessionId, second!.SessionId);
+		}
+
+		/// <summary>Two different addresses are unrelated and must not contend for one claim.</summary>
+		[Fact]
+		public async Task Different_addresses_each_get_their_own_live_session()
+		{
+			await using var fixture = new EmailSwitchIntegrationFixture();
+
+			var first = await CreateSession(fixture);
+			var second = await fixture.DbService.GetOrCreateAndGetLatestSession(
+				"someone.else@example.com", [], [], [new LanguageIsoCode()], UserAgent.WebBrowser);
+
+			Assert.NotNull(second);
+			Assert.NotEqual(first!.SessionId, second!.SessionId);
+		}
+
+		/// <summary>
+		/// Released claims must not collide with one another. The index is unique, so if releasing
+		/// wrote a null instead of removing the field, the second address to release one would be
+		/// rejected and could never open another session.
+		/// </summary>
+		[Fact]
+		public async Task Many_released_claims_can_coexist()
+		{
+			await using var fixture = new EmailSwitchIntegrationFixture();
+			string[] addresses = ["a@example.com", "b@example.com", "c@example.com"];
+
+			foreach (var address in addresses)
+			{
+				var session = await fixture.DbService.GetOrCreateAndGetLatestSession(
+					address, [], [], [new LanguageIsoCode()], UserAgent.WebBrowser);
+
+				// Releases the claim.
+				await fixture.DbService.RegisterSuccessfulVerification(session!.SessionId);
+			}
+
+			// Every address can still open a fresh session afterwards.
+			foreach (var address in addresses)
+			{
+				Assert.NotNull(await fixture.DbService.GetOrCreateAndGetLatestSession(
+					address, [], [], [new LanguageIsoCode()], UserAgent.WebBrowser));
+			}
 		}
 
 		// ------------------------------------------------------------ retiring the cleartext code

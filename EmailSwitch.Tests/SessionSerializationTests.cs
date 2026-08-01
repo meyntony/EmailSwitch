@@ -120,6 +120,32 @@ namespace EmailSwitch.Tests
 			Assert.Null(notStarted.EmailProvidersQueue);
 		}
 
+		/// <summary>
+		/// A sparse unique index skips documents where the field is <em>absent</em>, not where it is
+		/// BSON null. If a released claim serialised as null, every released session would land in
+		/// that index under the same key and only one of them could exist at a time - across all
+		/// addresses. So the field has to be omitted entirely.
+		/// </summary>
+		[Fact]
+		public void A_released_live_claim_is_omitted_rather_than_written_as_null()
+		{
+			var session = CreateSession();
+			session.LiveClaimKey = null;
+
+			Assert.False(session.ToBsonDocument().Contains(nameof(EmailSwitchSession.LiveClaimKey)));
+		}
+
+		[Fact]
+		public void A_held_live_claim_round_trips()
+		{
+			var session = CreateSession();
+			session.LiveClaimKey = "user@example.com";
+
+			var roundTripped = BsonSerializer.Deserialize<EmailSwitchSession>(session.ToBsonDocument());
+
+			Assert.Equal("user@example.com", roundTripped.LiveClaimKey);
+		}
+
 		private sealed class WithOffset
 		{
 			public DateTimeOffset When { get; init; }

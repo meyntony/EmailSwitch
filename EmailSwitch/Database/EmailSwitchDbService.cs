@@ -80,6 +80,13 @@ namespace EmailSwitch.Database
 						.Descending(session => session.ExpiryTimeUTC));
 
 				await _emailSwitchSessionCollection.Indexes.CreateOneAsync(indexModel);
+
+				// Sparse, so it only covers sessions currently holding the claim. That is what makes
+				// creation atomic without penalising the ones that have handed it back.
+				await _emailSwitchSessionCollection.Indexes.CreateOneAsync(new CreateIndexModel<EmailSwitchSession>(
+					Builders<EmailSwitchSession>.IndexKeys.Ascending(session => session.LiveClaimKey),
+					new CreateIndexOptions { Unique = true, Sparse = true }));
+
 				await EnsureRetentionIndex();
 				_indexReady = true;
 			}
@@ -224,6 +231,11 @@ namespace EmailSwitch.Database
 				return latestSession;
 			}
 
+			// Nothing live was found, so a predecessor may still be holding the claim for this
+			// address. Hand it back before trying to take it, or a user whose session merely timed
+			// out could never open another one.
+			await ReleaseStaleClaim(emailPendingVerification.ToString(), _emailSwitchInitializer.EmailControls.MaximumFailedAttemptsToVerify);
+
 			// The session id is needed to mint the token and to build the logo URL, so it is settled
 			// before the session itself is constructed.
 			var sessionId = Guid.NewGuid().ToString();
@@ -240,6 +252,7 @@ namespace EmailSwitch.Database
 			{
 				SessionId = sessionId,
 				EmailId = emailPendingVerification.ToString(),
+				LiveClaimKey = emailPendingVerification.ToString(),
 				StartTimeUTC = startTimeUTC,
 				ExpiryTimeUTC = startTimeUTC.AddSeconds(sessionTimeoutInSeconds),
 				SendOTPEmail = EmailTemplates.TemplateCreator.CreateSendOTPEmail(
@@ -255,10 +268,61 @@ namespace EmailSwitch.Database
 					signatureLogoUri: new Uri(_settingsService.BaseUri, EmailSignatureLogoEndpoint.EmailSignatureLogoRelativeUrl(sessionId)))
 			};
 
-			await _emailSwitchSessionCollection.InsertOneAsync(latestSession);
+			try
+			{
+				await _emailSwitchSessionCollection.InsertOneAsync(latestSession);
+			}
+			catch (MongoWriteException exception) when (exception.WriteError?.Category == ServerErrorCategory.DuplicateKey)
+			{
+				// Another request opened the live session for this address between our lookup and our
+				// insert, and the unique claim index arbitrated. Theirs stands; ours was never
+				// emailed, and the token minted for it is never handed out and ages out on its own.
+				// Without this both callers would send a different code to the same inbox, and only
+				// one of the two would verify.
+				_logger.LogInformation("A concurrent request already opened the live session for {Email}; reusing it rather than sending a second code.", emailPendingVerification);
+
+				return await GetLatestSession(emailPendingVerification);
+			}
 
 			return latestSession;
 		}
+
+		/// <summary>
+		/// Hands back the live-session claim from a session that can no longer be used - verified,
+		/// timed out, or out of verification attempts.
+		///
+		/// The conditions mirror exactly what <see cref="GetLatestSession"/> will and will not return.
+		/// That equivalence is the point: releasing a claim must never resurrect a session the reader
+		/// would have refused, and must never withhold a session the caller could already have had.
+		/// </summary>
+		private async Task ReleaseStaleClaim(string emailId, byte maximumFailedAttemptsToVerify)
+		{
+			await _emailSwitchSessionCollection.UpdateManyAsync(
+				Builders<EmailSwitchSession>.Filter.And(
+					Builders<EmailSwitchSession>.Filter.Eq(session => session.LiveClaimKey, emailId),
+					Builders<EmailSwitchSession>.Filter.Or(
+						Builders<EmailSwitchSession>.Filter.Ne(session => session.SuccessfullyVerifiedTimestampUTC, null),
+						Builders<EmailSwitchSession>.Filter.Lte(session => session.ExpiryTimeUTC, DateTime.UtcNow),
+						AttemptsExhausted(maximumFailedAttemptsToVerify))),
+				Builders<EmailSwitchSession>.Update.Unset(session => session.LiveClaimKey));
+		}
+
+		/// <summary>
+		/// Sessions with no verification attempt left. The complement of the condition
+		/// <see cref="TryReserveVerificationAttempt"/> claims against, expressed the same two ways so
+		/// that sessions written before <see cref="EmailSwitchSession.VerificationAttemptsCount"/>
+		/// existed are judged by their audit list instead.
+		/// </summary>
+		private static FilterDefinition<EmailSwitchSession> AttemptsExhausted(byte maximumFailedAttemptsToVerify) =>
+			maximumFailedAttemptsToVerify == 0
+				// Nothing may be attempted at all, so every session is exhausted by definition - and
+				// the array index below has no meaningful form for it.
+				? Builders<EmailSwitchSession>.Filter.Empty
+				: Builders<EmailSwitchSession>.Filter.Or(
+					Builders<EmailSwitchSession>.Filter.Gte(session => session.VerificationAttemptsCount, maximumFailedAttemptsToVerify),
+					Builders<EmailSwitchSession>.Filter.Exists(
+						$"{nameof(EmailSwitchSession.FailedVerificationAttemptsUTC)}.{maximumFailedAttemptsToVerify - 1}",
+						true));
 
 		internal async Task<EmailSwitchSession?> GetLatestSession(EmailIdentifier emailPendingVerification)
 		{
@@ -408,7 +472,10 @@ namespace EmailSwitch.Database
 					Builders<EmailSwitchSession>.Filter.Eq(session => session.SuccessfullyVerifiedTimestampUTC, null)),
 				Builders<EmailSwitchSession>.Update.Combine(
 					Builders<EmailSwitchSession>.Update.Set(session => session.SuccessfullyVerifiedTimestampUTC, DateTime.UtcNow),
-					RetireRenderedEmail));
+					RetireRenderedEmail,
+					// Released here rather than left for the next create to reclaim lazily: this
+					// session is finished, and the next send for this address deserves a new one.
+					Builders<EmailSwitchSession>.Update.Unset(session => session.LiveClaimKey)));
 		}
 
 		internal async Task RegisterRenderRequest(string id)
