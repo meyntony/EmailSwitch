@@ -114,6 +114,45 @@ namespace EmailSwitch.Tests
 			// Disabling retention must not cost the lookup index.
 			Assert.NotNull(CompoundLookupIndex(indexes));
 		}
+
+		/// <summary>
+		/// The case the test above cannot reach, because it starts on a brand new database with no
+		/// index to leave behind. Turning retention off used to return early, so on a collection that
+		/// already had the TTL index the sessions went on being reaped on the old schedule while the
+		/// configuration said to keep them forever.
+		/// </summary>
+		[Theory]
+		[InlineData(0)]
+		[InlineData(-1)]
+		public async Task Turning_retention_off_drops_the_existing_ttl_index(int sessionRetentionDays)
+		{
+			await using var fixture = new EmailSwitchIntegrationFixture(sessionRetentionDays: 90);
+			Assert.NotNull(SingleFieldExpiryIndex(await IndexesAfterFirstUse(fixture)));
+
+			var indexes = await IndexesAfterFirstUse(fixture, fixture.WithRetention(sessionRetentionDays));
+
+			Assert.Null(SingleFieldExpiryIndex(indexes));
+			// And the index every read depends on is untouched - it also contains ExpiryTimeUTC, so a
+			// matcher that forgot to require a single key would have dropped it instead.
+			var lookupIndex = CompoundLookupIndex(indexes);
+			Assert.NotNull(lookupIndex);
+			Assert.False(lookupIndex!.Contains("expireAfterSeconds"));
+		}
+
+		/// <summary>Turning retention back on after disabling it must recreate the index.</summary>
+		[Fact]
+		public async Task Retention_can_be_turned_off_and_on_again()
+		{
+			await using var fixture = new EmailSwitchIntegrationFixture(sessionRetentionDays: 90);
+			await IndexesAfterFirstUse(fixture);
+
+			Assert.Null(SingleFieldExpiryIndex(await IndexesAfterFirstUse(fixture, fixture.WithRetention(0))));
+
+			var ttlIndex = SingleFieldExpiryIndex(await IndexesAfterFirstUse(fixture, fixture.WithRetention(30)));
+
+			Assert.NotNull(ttlIndex);
+			Assert.Equal(TimeSpan.FromDays(30).TotalSeconds, ttlIndex!["expireAfterSeconds"].ToDouble());
+		}
 	}
 
 	public sealed class SessionRetentionConfigurationTests

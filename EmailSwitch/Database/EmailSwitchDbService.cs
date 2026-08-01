@@ -117,6 +117,10 @@ namespace EmailSwitch.Database
 
 			if (sessionRetentionDays <= 0)
 			{
+				// Not merely "create nothing". On a collection that already carries the TTL index,
+				// returning here left it in place, so sessions went on being reaped on the old
+				// schedule while the configuration - and the README - said to keep them forever.
+				await DropRetentionIndex();
 				return;
 			}
 
@@ -138,14 +142,16 @@ namespace EmailSwitch.Database
 		}
 
 		/// <summary>
-		/// Points collMod at whatever the existing single-field ExpiryTimeUTC index is actually
-		/// called, because collMod addresses an index by name and fails on a name that is not there.
+		/// The name of the existing single-field ExpiryTimeUTC index, or null if there is not one.
+		/// Both collMod and dropIndex address an index by name and fail on a name that is not there,
+		/// so neither can assume the server-derived ExpiryTimeUTC_1.
 		///
-		/// The single-key requirement matters: the compound lookup index also contains ExpiryTimeUTC,
-		/// and matching it here would put an expiry on the index the reads depend on and start
-		/// deleting sessions on the wrong schedule.
+		/// The single-key requirement is the point of this method. The compound lookup index also
+		/// contains ExpiryTimeUTC, so a matcher that forgot <c>ElementCount == 1</c> would hand back
+		/// the index every read depends on - and its callers would then either put an expiry on it or
+		/// drop it outright.
 		/// </summary>
-		private async Task AmendRetentionOnExistingIndex(int sessionRetentionDays)
+		private async Task<string?> FindRetentionIndexName()
 		{
 			using var cursor = await _emailSwitchSessionCollection.Indexes.ListAsync();
 			var indexes = await cursor.ToListAsync();
@@ -156,7 +162,41 @@ namespace EmailSwitch.Database
 				&& keyDocument.ElementCount == 1
 				&& keyDocument.Contains(nameof(EmailSwitchSession.ExpiryTimeUTC)));
 
-			if (existing is null || !existing.TryGetValue("name", out var name))
+			return existing is not null && existing.TryGetValue("name", out var name) ? name.AsString : null;
+		}
+
+		/// <summary>
+		/// Removes the TTL index so sessions stop being reaped, which is what a retention of zero or
+		/// less asks for. A no-op when there is no such index, so a collection that never had one is
+		/// left alone.
+		/// </summary>
+		private async Task DropRetentionIndex()
+		{
+			var indexName = await FindRetentionIndexName();
+
+			if (indexName is null)
+			{
+				return;
+			}
+
+			await _emailSwitchSessionCollection.Indexes.DropOneAsync(indexName);
+
+			_logger.LogInformation(
+				"Session retention is disabled, so the {IndexName} TTL index on {Collection} was dropped; sessions are now kept indefinitely.",
+				indexName,
+				nameof(EmailSwitchSession));
+		}
+
+		/// <summary>
+		/// Amends the expiry on the existing index in place. MongoDB refuses to recreate an index with
+		/// different options, so changing the setting - which the README documents doing - would
+		/// otherwise throw on every call.
+		/// </summary>
+		private async Task AmendRetentionOnExistingIndex(int sessionRetentionDays)
+		{
+			var indexName = await FindRetentionIndexName();
+
+			if (indexName is null)
 			{
 				// Nothing single-field on ExpiryTimeUTC to amend, so the conflict was about something
 				// else. Leave the collection alone rather than inventing an index.
@@ -169,7 +209,7 @@ namespace EmailSwitch.Database
 				{ "collMod", _emailSwitchSessionCollection.CollectionNamespace.CollectionName },
 				{ "index", new BsonDocument
 					{
-						{ "name", name },
+						{ "name", indexName },
 						{ "expireAfterSeconds", TimeSpan.FromDays(sessionRetentionDays).TotalSeconds }
 					}
 				}
