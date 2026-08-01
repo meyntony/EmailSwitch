@@ -2,8 +2,8 @@
 {
 	public sealed class EmailContent
 	{
-		public string Subject { get; init; }
-		public string PlainTextContent { get; init; }
-		public string HtmlContent { get; init; }
+		public required string Subject { get; init; }
+		public required string PlainTextContent { get; init; }
+		public required string HtmlContent { get; init; }
 	}
 }

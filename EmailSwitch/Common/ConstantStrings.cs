@@ -2,8 +2,8 @@
 {
 	public static class ConstantStrings
 	{
-		public static string EmailSwitchSettingsName = "EmailSwitchSettings";
-		public static string EmailSwitchGroupName = "emailswitch";
-		public static string EmailSwitchTagName = "EmailSwitch";
+		public const string EmailSwitchSettingsName = "EmailSwitchSettings";
+		public const string EmailSwitchGroupName = "emailswitch";
+		public const string EmailSwitchTagName = "EmailSwitch";
 	}
 }
