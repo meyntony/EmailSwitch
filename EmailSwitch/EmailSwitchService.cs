@@ -74,12 +74,17 @@ namespace EmailSwitch
 					};
 				}
 
+				// Accumulated in memory and written once at the end. The session document is never
+				// replaced wholesale, so attempts have to arrive as a $push rather than as a field of
+				// a document read before the provider call.
+				var sentAttempts = new List<AttemptDetailsSendOTP>();
+
 				while (emailProvidersQueue.Any())
 				{
 					var emailProvider = emailProvidersQueue.Peek();
 					responseSendOTP = await ProviderFor(emailProvider).SendOTP(email, session.SendOTPEmail);
 
-					session.SentAttempts.Add(new AttemptDetailsSendOTP(DateTime.UtcNow, emailProvider, responseSendOTP.IsSent));
+					sentAttempts.Add(new AttemptDetailsSendOTP(DateTime.UtcNow, emailProvider, responseSendOTP.IsSent));
 
 					// Every attempt spends one slot, success included, so a caller cannot mail the
 					// same address indefinitely by resending. Only a failure falls through to the
@@ -99,8 +104,7 @@ namespace EmailSwitch
 					responseSendOTP.ExpiryDateTimeOffset = session.ExpiryTimeUTC;
 				}
 
-				session.EmailProvidersQueue = emailProvidersQueue;
-				await _emailSwitchDbService.UpdateSession(session);
+				await _emailSwitchDbService.RegisterSendAttempts(session.SessionId, emailProvidersQueue, sentAttempts);
 
 				if (responseSendOTP == null || !responseSendOTP.IsSent)
 				{

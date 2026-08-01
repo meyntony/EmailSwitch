@@ -244,13 +244,31 @@ namespace EmailSwitch.Database
 		private FilterDefinition<EmailSwitchSession> Filter(EmailIdentifier emailPendingVerification) => Builders<EmailSwitchSession>.Filter.Eq(t => t.EmailId, emailPendingVerification.ToString());
 
 		/// <summary>
+		/// Records the outcome of a send: what is left of the budget, and the attempts just made.
+		///
+		/// Deliberately a targeted update rather than replacing the whole document. SendOTP reads the
+		/// session, then awaits a provider over the network before writing, and a full replace reverted
+		/// everything the server recorded in that window - a failed verification push, the verified
+		/// stamp, a logo render. Losing brute-force increments that way is precisely what
+		/// <see cref="RegisterFailedVerificationAttempt"/> exists to avoid, so the send path must not
+		/// reintroduce it.
+		///
 		/// Not an upsert. The session is always inserted by GetOrCreateAndGetLatestSession before this
 		/// runs, so a filter that matches nothing means the session has since been reaped by the
 		/// retention TTL index - and a reaped session must stay reaped rather than be written back.
 		/// </summary>
-		internal async Task UpdateSession(EmailSwitchSession session)
+		internal async Task RegisterSendAttempts(string sessionId, Queue<EmailProvider> remainingBudget, IReadOnlyCollection<AttemptDetailsSendOTP> sentAttempts)
 		{
-			await _emailSwitchSessionCollection.ReplaceOneAsync(Filter(session.SessionId), session);
+			var update = Builders<EmailSwitchSession>.Update.Set(session => session.EmailProvidersQueue, remainingBudget);
+
+			if (sentAttempts.Count > 0)
+			{
+				update = Builders<EmailSwitchSession>.Update.Combine(
+					update,
+					Builders<EmailSwitchSession>.Update.PushEach(session => session.SentAttempts, sentAttempts));
+			}
+
+			await _emailSwitchSessionCollection.UpdateOneAsync(Filter(sessionId), update);
 		}
 
 		/// <summary>

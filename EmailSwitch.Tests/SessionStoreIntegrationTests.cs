@@ -38,8 +38,10 @@ namespace EmailSwitch.Tests
 			Assert.NotNull(session);
 
 			// Exactly what SendOTP persists once the final slot is spent.
-			session!.EmailProvidersQueue = new Queue<EmailProvider>();
-			await fixture.DbService.UpdateSession(session);
+			await fixture.DbService.RegisterSendAttempts(
+				session!.SessionId,
+				new Queue<EmailProvider>(),
+				[new AttemptDetailsSendOTP(DateTime.UtcNow, EmailProvider.SendGrid, true)]);
 
 			var reloaded = await fixture.DbService.GetLatestSession(Email);
 
@@ -66,6 +68,61 @@ namespace EmailSwitch.Tests
 			var reloaded = await Reload(fixture, session!.SessionId);
 
 			Assert.Equal(concurrentGuesses, reloaded.FailedVerificationAttemptsUTC.Count);
+		}
+
+		/// <summary>
+		/// The send path used to replace the whole session document, reading it before a provider call
+		/// and writing it back after. Anything the server recorded in that window was reverted - most
+		/// damagingly the brute-force counter, which meant a resend racing a guess handed the guesser
+		/// its attempts back.
+		/// </summary>
+		[Fact]
+		public async Task A_send_write_does_not_revert_what_the_server_recorded_while_it_was_in_flight()
+		{
+			await using var fixture = new EmailSwitchIntegrationFixture(maximumFailedAttemptsToVerify: 250);
+			var session = await CreateSession(fixture);
+
+			// Stands in for SendOTP having loaded the session before the provider call.
+			var budgetAsRead = session!.EmailProvidersQueue;
+
+			// Recorded server side while that send is notionally still awaiting its provider.
+			await fixture.DbService.RegisterFailedVerificationAttempt(session.SessionId);
+			await fixture.DbService.RegisterFailedVerificationAttempt(session.SessionId);
+			await fixture.DbService.RegisterRenderRequest(session.SessionId);
+			await fixture.DbService.RegisterSuccessfulVerification(session.SessionId);
+
+			// The send now completes and writes what it knows.
+			await fixture.DbService.RegisterSendAttempts(
+				session.SessionId,
+				new Queue<EmailProvider>(budgetAsRead ?? new Queue<EmailProvider>()),
+				[new AttemptDetailsSendOTP(DateTime.UtcNow, EmailProvider.SendGrid, true)]);
+
+			var reloaded = await Reload(fixture, session.SessionId);
+
+			Assert.Equal(2, reloaded.FailedVerificationAttemptsUTC.Count);
+			Assert.Single(reloaded.LogoRenderedAttemptsUTC);
+			Assert.NotNull(reloaded.SuccessfullyVerifiedTimestampUTC);
+			// And the send's own field did land.
+			Assert.Single(reloaded.SentAttempts);
+		}
+
+		/// <summary>Two sends racing must both leave a record, not overwrite one another.</summary>
+		[Fact]
+		public async Task Concurrent_send_writes_each_leave_their_attempt()
+		{
+			await using var fixture = new EmailSwitchIntegrationFixture();
+			var session = await CreateSession(fixture);
+
+			const int concurrentSends = 10;
+			await Task.WhenAll(Enumerable.Range(0, concurrentSends).Select(_ =>
+				fixture.DbService.RegisterSendAttempts(
+					session!.SessionId,
+					new Queue<EmailProvider>(),
+					[new AttemptDetailsSendOTP(DateTime.UtcNow, EmailProvider.SendGrid, true)])));
+
+			var reloaded = await Reload(fixture, session!.SessionId);
+
+			Assert.Equal(concurrentSends, reloaded.SentAttempts.Count);
 		}
 
 		[Fact]
