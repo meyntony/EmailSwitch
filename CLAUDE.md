@@ -25,6 +25,12 @@ Part of the suite needs a reachable MongoDB (`mongodb://localhost:27017`, overri
 `MONGODB_CONNECTION_STRING`). `.github/workflows/ci.yml` provides a `mongo:8` service for this;
 `release.yml` runs no tests and needs none.
 
+Under `-warnaserror` the xUnit analyzers are errors too. The one that bites: **xUnit1051** fails any
+call accepting a `CancellationToken` made *directly inside a test method* without passing
+`TestContext.Current.CancellationToken`. Moving the call into a private helper is usually the tidier
+fix. Where cleanup must run even on cancellation — dropping a test database — the existing code
+passes no token on purpose and suppresses the rule locally; keep that.
+
 ## What this is
 
 A NuGet library that sends and verifies email one-time passcodes. It owns the session, the code, its
@@ -115,9 +121,12 @@ Non-obvious, and each of these has caused a real bug:
   disables it and keeps them forever). It is a **second, single-field** index on `ExpiryTimeUTC`,
   because a TTL index cannot be compound. When amending it, the matcher must require
   `key.ElementCount == 1` or it will find the compound lookup index — which also contains
-  `ExpiryTimeUTC` — and put an expiry on the index every read depends on. Changing the setting is
-  applied with `collMod`, since MongoDB refuses to recreate an index with different options; the
-  same pattern, and the same bug, exist in MongoDbTokenManager (`619679b`).
+  `ExpiryTimeUTC` — and put an expiry on the index every read depends on, or drop it outright.
+  `FindRetentionIndexName` is that matcher, shared by both callers. Changing the setting is applied
+  with `collMod`, since MongoDB refuses to recreate an index with different options; the same
+  pattern, and the same bug, exist in MongoDbTokenManager (`619679b`). Turning retention **off** has
+  to *drop* the existing index, not just skip creating one — returning early left sessions being
+  reaped on the old schedule while the configuration said to keep them forever.
 - **The `Tokens` collection is shared** with everything else using MongoDbTokenManager against the same
   database, including SMSwitch. Dropping it invalidates their in-flight OTPs too.
 - Token documents written by MongoDbTokenManager **10.0.0 cannot be deserialised by 10.2.0+** — expiry
@@ -125,9 +134,11 @@ Non-obvious, and each of these has caused a real bug:
   `FormatException`. `VerifyOTP` catches it; `StoredTokenCompatibilityTests` pins it and will fail if
   upstream ever adds `[BsonIgnoreExtraElements]`, at which point the workaround can go.
 
-The `EmailId` + `ExpiryTimeUTC` index is created on first use behind a gate
+All three indexes — the compound `EmailId` + `ExpiryTimeUTC` lookup, the sparse unique `LiveClaimKey`,
+and the `ExpiryTimeUTC` TTL — are created together on first use behind a gate
 (`EmailSwitchDbService.EnsureSessionIndex`), not in the constructor, so building the DI container
-never blocks on the network.
+never blocks on the network. A failed attempt is not cached, so a transient outage does not leave the
+collection permanently unindexed.
 
 ## Configuration and startup
 
@@ -141,6 +152,12 @@ Everything fails hard at startup with a named error: missing `SignatureLogoPath`
 `SessionTimeoutInSeconds` below 30, a `Priority` list with no recognised provider, and — only when
 SendGrid is actually resolved — missing `From` or `Password`. Provider names parse case-insensitively;
 unrecognised ones are logged and skipped.
+
+**`Priority` is a `List`, not a `HashSet`, deliberately.** It is the failover order, and `HashSet<T>`
+does not promise enumeration order — it happens to preserve insertion order only while nothing is
+removed, which is an implementation detail rather than something to route email on. Duplicates are
+collapsed explicitly in `GetPriority`, keeping the first position, so naming a provider twice does
+not silently double its share of the send budget.
 
 Nothing may take a hard dependency on `SendGridInitializer`, or a credential-free DevConsole run
 breaks. Providers are only constructed when resolved through the keyed lookup.
@@ -156,11 +173,18 @@ on the `WebApplication` or the signature logo 404s in every email.
 
 - **Pure tests** needing nothing: template rendering, `EmailIdentifier` normalisation, `HasNotExpired`,
   the config binders, BSON round-trips, DI registration.
-- **MongoDB-backed integration tests** (`SessionStoreIntegrationTests`, the DevConsole end-to-end)
-  using `EmailSwitchIntegrationFixture` — a uniquely named database per test, dropped on disposal.
-  Modelled on `MongoDbTokenManager.Tests/MongoIntegrationFixture.cs`. They exist because the
-  `GetLatestSession` server-side filter and the concurrent attempt counter cannot be established by
-  reasoning over the C#.
+- **MongoDB-backed integration tests** (`SessionStoreIntegrationTests`, `SessionRetentionTests`,
+  `VerificationCapIntegrationTests`, the DevConsole end-to-end) using `EmailSwitchIntegrationFixture`
+  — a uniquely named database per test, dropped on disposal. Modelled on
+  `MongoDbTokenManager.Tests/MongoIntegrationFixture.cs`. They exist because the server is the thing
+  under test: the `GetLatestSession` filter, whether the attempt cap actually holds under
+  concurrency, what a unique index does to a session that has timed out. None of that can be
+  established by reasoning over the C#, and each of those three was measured to behave differently
+  from the obvious expectation.
+
+Concurrency claims here are worth *measuring* rather than arguing about — a throwaway test that
+`Assert.Fail`s with the number it observed settles in a minute what a code review will not. That is
+where the "16 admitted against a cap of 3" and the `DuplicateKey`-on-successor findings came from.
 
 `TestHost` builds a real container through `AddEmailSwitchServices()`, so tests catch missing or
 mis-keyed registrations. Prefer it over hand-assembling an object graph. MongoDB is not dialled unless
@@ -177,9 +201,9 @@ provider dependency, as `BuildProviderQueue` was.
 inferring behaviour from names. Each `.nuspec` records the exact commit it was built from, which is
 the reliable way to check whether a published package contains a given change.
 
-EmailSwitch depends on SMSwitch only for the `MobileNumber` and `UserAgent` DTOs. SMSwitch 10.3.0
-carries `<FrameworkReference Include="Microsoft.AspNetCore.App" />`; EmailSwitch declares its own
-rather than inheriting it transitively, because it maps its own endpoint.
+EmailSwitch depends on SMSwitch only for the `MobileNumber` and `UserAgent` DTOs. SMSwitch (10.4.0 at
+time of writing) carries `<FrameworkReference Include="Microsoft.AspNetCore.App" />`; EmailSwitch
+declares its own rather than inheriting it transitively, because it maps its own endpoint.
 
 ## Style and release
 
@@ -189,5 +213,15 @@ that git then reports as whole-file rewrites.
 
 Releases are tag-driven: pushing a `v*.*.*` tag builds, packs and publishes to NuGet via
 `.github/workflows/release.yml`. The version comes from the tag, not the csproj.
+
+**Publishing uses NuGet Trusted Publishing (OIDC), not an API key.** `NuGet/login@v1` exchanges the
+workflow's OIDC token for a short-lived key, which is why the job needs `id-token: write`. There is no
+`NUGET_API_KEY` secret any more — do not reintroduce one. It depends on a Trusted Publishing policy
+existing on nuget.org for the owner, repo and workflow filename; without it the login step fails at
+tag time and nothing publishes. Mirrors `prmeyn/HumanLanguages@88e2aa5`.
+
+Because the version comes from the tag, **a public API change needs a deliberate version choice** —
+a patch tag will happily ship a breaking change. `EmailSwitchSession.SendOTPEmail` becoming nullable
+and `EmailControls.Priority` becoming a `List` are both breaks that landed this way.
 
 Licensed **AGPL-3.0**.
