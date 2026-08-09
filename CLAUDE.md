@@ -224,4 +224,4 @@ Because the version comes from the tag, **a public API change needs a deliberate
 a patch tag will happily ship a breaking change. `EmailSwitchSession.SendOTPEmail` becoming nullable
 and `EmailControls.Priority` becoming a `List` are both breaks that landed this way.
 
-Licensed **AGPL-3.0**.
+Licensed **MIT**.

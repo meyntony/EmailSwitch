@@ -279,6 +279,6 @@ or a pull request on GitHub: https://github.com/prmeyn/EmailSwitch
 
 ## License
 
-This project is licensed under the GNU AFFERO GENERAL PUBLIC LICENSE.
+This project is licensed under the MIT License.
 
 Happy coding! 🚀🌐📚
