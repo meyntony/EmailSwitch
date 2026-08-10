@@ -1,4 +1,5 @@
-﻿using Microsoft.Extensions.Configuration;
+﻿using EmailSwitch.Services.Resend;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Hosting;
@@ -46,6 +47,13 @@ namespace EmailSwitch.Tests
 			return settings;
 		}
 
+		internal static Dictionary<string, string?> WithResend(this Dictionary<string, string?> settings)
+		{
+			settings["EmailSwitchSettings:Resend:From"] = "noreply@example.com";
+			settings["EmailSwitchSettings:Resend:ApiKey"] = "re_fake-api-key";
+			return settings;
+		}
+
 		internal static Dictionary<string, string?> WithPriority(this Dictionary<string, string?> settings, params string[] providers)
 		{
 			for (var index = 0; index < providers.Length; index++)
@@ -55,7 +63,11 @@ namespace EmailSwitch.Tests
 			return settings;
 		}
 
-		internal static ServiceProvider Build(Dictionary<string, string?> settings, string environmentName = "Development", ILoggerProvider? loggerProvider = null)
+		internal static ServiceProvider Build(
+			Dictionary<string, string?> settings,
+			string environmentName = "Development",
+			ILoggerProvider? loggerProvider = null,
+			HttpMessageHandler? resendHandler = null)
 		{
 			var configuration = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
 
@@ -67,6 +79,15 @@ namespace EmailSwitch.Tests
 			services.AddMongoDbServices();
 			services.AddMongoDbTokenServices();
 			services.AddEmailSwitchServices();
+
+			// Layered onto the named client after the real registration rather than replacing it, so a
+			// send test still goes through the client AddEmailSwitchServices configured - base address,
+			// timeout and all - and only the socket at the bottom is substituted.
+			if (resendHandler is not null)
+			{
+				services.AddHttpClient(ResendInitializer.HttpClientName)
+					.ConfigurePrimaryHttpMessageHandler(() => resendHandler);
+			}
 
 			return services.BuildServiceProvider();
 		}
@@ -99,6 +120,21 @@ namespace EmailSwitch.Tests
 							.Where(match => match.Success)
 							.Select(match => match.Groups[1].Value)
 							.LastOrDefault() ?? string.Empty;
+					}
+				}
+			}
+
+			/// <summary>
+			/// Everything logged, in order. <see cref="CapturedOtp"/> only greps for the code, which is
+			/// no use to a test asserting that a provider's rejection reason reached the log.
+			/// </summary>
+			internal IReadOnlyList<string> Messages
+			{
+				get
+				{
+					lock (_messages)
+					{
+						return [.. _messages];
 					}
 				}
 			}

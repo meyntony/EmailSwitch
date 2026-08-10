@@ -203,6 +203,15 @@ namespace EmailSwitch.Tests
 			Assert.Equal([EmailProvider.SendGrid, EmailProvider.DevConsole], initializer.EmailControls.Priority);
 		}
 
+		/// <summary>Order still holds once there is more than one real provider to fail over between.</summary>
+		[Fact]
+		public void The_order_is_preserved_across_three_providers()
+		{
+			var initializer = Create(priority: ["Resend", "SendGrid", "DevConsole"]);
+
+			Assert.Equal([EmailProvider.Resend, EmailProvider.SendGrid, EmailProvider.DevConsole], initializer.EmailControls.Priority);
+		}
+
 		/// <summary>
 		/// Listing a provider twice would otherwise double its share of the send budget, which is not
 		/// what repeating a name in a priority list means.
@@ -256,6 +265,17 @@ namespace EmailSwitch.Tests
 			var initializer = Create(priority: [configuredProvider]);
 
 			Assert.Equal([EmailProvider.SendGrid], initializer.EmailControls.Priority);
+		}
+
+		[Theory]
+		[InlineData("Resend")]
+		[InlineData("resend")]
+		[InlineData("RESEND")]
+		public void Resend_is_matched_case_insensitively(string configuredProvider)
+		{
+			var initializer = Create(priority: [configuredProvider]);
+
+			Assert.Equal([EmailProvider.Resend], initializer.EmailControls.Priority);
 		}
 
 		/// <summary>
