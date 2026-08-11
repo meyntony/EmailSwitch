@@ -1,6 +1,7 @@
 ﻿using EmailSwitch.Common;
 using EmailSwitch.Database;
 using EmailSwitch.Services.DevConsole;
+using EmailSwitch.Services.Resend;
 using EmailSwitch.Services.SendGrid;
 using Microsoft.Extensions.DependencyInjection;
 using uSignIn.CommonSettings;
@@ -25,12 +26,23 @@ namespace EmailSwitch
 
 			// Provider registrations are only constructed when a provider is actually resolved
 			// through the keyed lookup below. That is what lets a DevConsole-only setup start with
-			// no SendGrid section at all - SendGridInitializer fails fast on missing credentials, so
-			// eagerly depending on it anywhere would make credential-free local development
-			// impossible.
+			// no SendGrid or Resend section at all - both of those initializers fail fast on missing
+			// credentials, so eagerly depending on either anywhere would make credential-free local
+			// development impossible.
 			services.AddSingleton<SendGridInitializer>();
 			services.AddScoped<SendGridService>();
 			services.AddScoped<DevConsoleService>();
+
+			// AddHttpClient stores a configuration; it constructs no client and reads no credential,
+			// so naming the Resend client here does not breach the rule above. The Authorization
+			// header is deliberately not configured on it - see ResendInitializer.
+			services.AddHttpClient(ResendInitializer.HttpClientName, httpClient =>
+			{
+				httpClient.BaseAddress = ResendInitializer.BaseAddress;
+				httpClient.Timeout = ResendInitializer.Timeout;
+			});
+			services.AddSingleton<ResendInitializer>();
+			services.AddScoped<ResendService>();
 
 			// Keyed by provider so EmailSwitchService can resolve one by EmailProvider instead of
 			// switching on it. The factories resolve the concrete registrations above, so there is
@@ -38,6 +50,7 @@ namespace EmailSwitch
 			// keeps working.
 			services.AddKeyedScoped<IServiceEmails>(EmailProvider.SendGrid, (serviceProvider, _) => serviceProvider.GetRequiredService<SendGridService>());
 			services.AddKeyedScoped<IServiceEmails>(EmailProvider.DevConsole, (serviceProvider, _) => serviceProvider.GetRequiredService<DevConsoleService>());
+			services.AddKeyedScoped<IServiceEmails>(EmailProvider.Resend, (serviceProvider, _) => serviceProvider.GetRequiredService<ResendService>());
 
 			services.AddScoped<EmailSwitchService>();
 		}

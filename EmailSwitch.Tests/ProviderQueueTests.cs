@@ -9,12 +9,15 @@ namespace EmailSwitch.Tests
 	/// </summary>
 	public sealed class ProviderQueueTests
 	{
-		private static EmailControls Controls(byte maxRoundRobinAttempts) => new()
+		private static EmailControls Controls(byte maxRoundRobinAttempts) =>
+			Controls(maxRoundRobinAttempts, [EmailProvider.SendGrid]);
+
+		private static EmailControls Controls(byte maxRoundRobinAttempts, List<EmailProvider> priority) => new()
 		{
 			MaximumFailedAttemptsToVerify = 3,
 			SessionTimeoutInSeconds = 240,
 			MaxRoundRobinAttempts = maxRoundRobinAttempts,
-			Priority = [EmailProvider.SendGrid]
+			Priority = priority
 		};
 
 		[Theory]
@@ -51,6 +54,29 @@ namespace EmailSwitch.Tests
 			var queue = EmailSwitchService.BuildProviderQueue(Controls(2));
 
 			Assert.Equal(EmailProvider.SendGrid, queue.Peek());
+		}
+
+		/// <summary>
+		/// A second real provider adds slots to the one shared budget; it does not get a budget of its
+		/// own. The whole list repeats in configured order, so failover reaches Resend and then comes
+		/// back round rather than draining one provider first.
+		/// </summary>
+		[Fact]
+		public void The_budget_repeats_the_whole_priority_list_in_order()
+		{
+			var queue = EmailSwitchService.BuildProviderQueue(Controls(2, [EmailProvider.Resend, EmailProvider.SendGrid]));
+
+			Assert.Equal(
+				[EmailProvider.Resend, EmailProvider.SendGrid, EmailProvider.Resend, EmailProvider.SendGrid],
+				queue);
+		}
+
+		[Fact]
+		public void The_head_of_a_resend_first_budget_is_resend()
+		{
+			var queue = EmailSwitchService.BuildProviderQueue(Controls(2, [EmailProvider.Resend, EmailProvider.SendGrid]));
+
+			Assert.Equal(EmailProvider.Resend, queue.Peek());
 		}
 	}
 }

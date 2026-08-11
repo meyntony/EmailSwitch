@@ -38,8 +38,9 @@ expiry, the attempt limits and the audit trail. It is on the authentication path
 correctness matter more than the line count suggests.
 
 Three layers: `EmailSwitchService` (the switchboard) → provider services implementing
-`IServiceEmails` (SendGrid, DevConsole) → the provider SDK. Providers are resolved by keyed DI on the
-`EmailProvider` enum, so adding one is a registration plus an implementation, not a new `switch` arm.
+`IServiceEmails` (SendGrid, Resend, DevConsole) → the provider SDK or its HTTP API. Providers are
+resolved by keyed DI on the `EmailProvider` enum, so adding one is a registration plus an
+implementation, not a new `switch` arm.
 
 **The provider contract is deliberately tiny**: `IServiceEmails.SendOTP(EmailIdentifier, EmailContent)`.
 `EmailSwitchDbService.GetOrCreateAndGetLatestSession` mints the code through MongoDbTokenManager and
@@ -143,15 +144,22 @@ collection permanently unindexed.
 ## Configuration and startup
 
 `EmailSwitchGeneralInitializer` reads the shared `EmailSwitchSettings` block and loads the signature
-logo. **`SendGridInitializer` composes it rather than deriving from it** — deriving forced a choice
+logo. **Provider initializers compose it rather than deriving from it** — deriving forced a choice
 between reading the logo from disk twice and forwarding one registration to the other, and the
 forwarding made every consumer of the general settings depend on SendGrid credentials existing. That
-left no way to run on DevConsole alone. Do not reintroduce the inheritance.
+left no way to run on DevConsole alone. `SendGridInitializer` and `ResendInitializer` both compose.
+Do not reintroduce the inheritance.
 
 Everything fails hard at startup with a named error: missing `SignatureLogoPath`,
 `SessionTimeoutInSeconds` below 30, a `Priority` list with no recognised provider, and — only when
-SendGrid is actually resolved — missing `From` or `Password`. Provider names parse case-insensitively;
-unrecognised ones are logged and skipped.
+that provider is actually resolved — SendGrid's `From` or `Password`, or Resend's `From` or `ApiKey`.
+Provider names parse case-insensitively; unrecognised ones are logged and skipped.
+
+**The API key is called `Password` on SendGrid and `ApiKey` on Resend, deliberately.** SendGrid's
+name is wrong — it is an API key, not a password — but a configuration key cannot be renamed without
+breaking every existing consumer on upgrade. New providers use the accurate name rather than
+inheriting the mistake, so the inconsistency is load-bearing in both directions and
+`ResendInitializerTests.The_sendgrid_key_name_is_not_accepted_as_an_alias` pins it.
 
 **`Priority` is a `List`, not a `HashSet`, deliberately.** It is the failover order, and `HashSet<T>`
 does not promise enumeration order — it happens to preserve insertion order only while nothing is
@@ -159,8 +167,31 @@ removed, which is an implementation detail rather than something to route email 
 collapsed explicitly in `GetPriority`, keeping the first position, so naming a provider twice does
 not silently double its share of the send budget.
 
-Nothing may take a hard dependency on `SendGridInitializer`, or a credential-free DevConsole run
-breaks. Providers are only constructed when resolved through the keyed lookup.
+Nothing may take a hard dependency on `SendGridInitializer` or `ResendInitializer`, or a
+credential-free DevConsole run breaks. Providers are only constructed when resolved through the keyed
+lookup.
+
+**Resend is reached over a typed `HttpClient`, not the `Resend` NuGet SDK.** The SDK is Resend's own
+officially maintained one — `github.com/resend/resend-dotnet`, listed on their Official SDKs page —
+and was still rejected deliberately, so "but it is official" is not a reason to revisit this. It is
+`0.x` after 29 releases, targets `net8.0`, and carries `PackageReference`s on
+`Microsoft.AspNetCore.WebUtilities`, `Microsoft.Extensions.Http` and `Microsoft.Extensions.Options`
+at 8.0.x — all of which already ship inside the `Microsoft.AspNetCore.App` shared framework this
+package references, so they would be imposed on every consumer for nothing. Worse, its
+`AddResend(o => o.ApiToken = …)` is a registration-time extension, which means reading the API key
+while the container is still being built — the exact eager credential read that makes a
+DevConsole-only host impossible to start. Going over HTTP costs one file and adds no dependency.
+
+Two consequences of that in `Services/Resend`:
+
+- `AddEmailSwitchServices()` registers a **named** `HttpClient` (`ResendInitializer.HttpClientName`)
+  with the base address and a 10 second timeout. That is safe eagerly — `AddHttpClient` stores a
+  configuration and constructs nothing. The **`Authorization` header is set per request** in
+  `ResendService`, not on the named client, because configuring it at `AddHttpClient` time would need
+  the API key during container build.
+- **No `Idempotency-Key` header.** Resend deduplicates on it for 24 hours and returns the original id
+  without sending anything. A resend here is *meant* to deliver the same code again, so a stable
+  per-session key would report success while nothing left Resend.
 
 Required config the library does not own: `MongoDbSettings:ConnectionString`, `Settings:BaseUrl` and
 `Settings:FrontendUrl` all throw if absent. The host must also call `AddMongoDbServices()` and
@@ -190,6 +221,16 @@ where the "16 admitted against a cap of 3" and the `DuplicateKey`-on-successor f
 mis-keyed registrations. Prefer it over hand-assembling an object graph. MongoDB is not dialled unless
 a real connection string is passed — the driver connects lazily, so services resolve against an
 unreachable server.
+
+`TestHost.Build`'s `resendHandler` parameter layers a stub `HttpMessageHandler` onto the named Resend
+client *after* `AddEmailSwitchServices()` has registered it, rather than replacing the registration.
+That keeps a send test on the real client — base address, timeout and all — and substitutes only the
+socket, so `ResendTests` needs neither a network nor a credential.
+
+`InitializerTests` uses **`"Mailgun"` and `"Postmark"`** as its stand-in unrecognised provider names
+(`Unknown_provider_names_are_ignored`, `A_priority_list_with_no_recognised_provider_is_rejected`).
+Adding either as a real provider breaks both tests; pick different stand-ins then rather than
+weakening the assertions.
 
 `InternalsVisibleTo` is set. When logic is worth testing, extract it to something with no database or
 provider dependency, as `BuildProviderQueue` was.

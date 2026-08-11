@@ -17,7 +17,7 @@ infrastructure.
   through to the next
 - **`DevConsole` provider for local testing** — writes the verification email to the log instead of
   sending it, so no credentials are needed ([see below](#local-testing-without-sending-real-email))
-- **Covers SendGrid** as the only real provider today (more can be added)
+- **Covers SendGrid and Resend** as real providers (more can be added)
 - **Audit trail in your own MongoDB** — every session, send attempt, failed verification and logo
   render is recorded
 
@@ -60,7 +60,7 @@ dotnet add package EmailSwitch
 | .NET 10.0 | The package targets `net10.0`. |
 | An ASP.NET Core host | EmailSwitch maps its own minimal-API endpoint for the email signature logo, so it references the ASP.NET Core shared framework. |
 | MongoDB | Sessions and tokens are stored in your instance. MongoDbTokenManager creates a TTL index to clean up expired tokens. |
-| A SendGrid account | Only for real sending — not needed if you use the `DevConsole` provider. |
+| A SendGrid or Resend account | Only for real sending — not needed if you use the `DevConsole` provider. Both need a verified sending domain before they will deliver to anyone; see [Worth knowing](#worth-knowing). |
 
 ### 3. Configure
 
@@ -81,10 +81,14 @@ misbehaving later, so a missing key is reported clearly.
     "OtpLength": 6,
     "SignatureLogoPath": "wwwroot/logo.png",
     "Controls": {
-      "Priority": [ "SendGrid" ],
+      "Priority": [ "Resend", "SendGrid" ],
       "MaxRoundRobinAttempts": 2,
       "MaximumFailedAttemptsToVerify": 3,
       "SessionTimeoutInSeconds": 240
+    },
+    "Resend": {
+      "From": "noreply@example.com",
+      "ApiKey": "re_your-api-key"
     },
     "SendGrid": {
       "From": "noreply@example.com",
@@ -94,11 +98,17 @@ misbehaving later, so a missing key is reported clearly.
 }
 ```
 
+You only need a section for the providers you actually name in `Priority`. A section for a provider
+you do not use is never read, and a provider you do name but do not configure fails startup.
+
 `Settings:BaseUrl` is the public root of your API — the signature logo URL embedded in the email is
 built from it, so it must be reachable by the recipient's email client.
 
-**Keep `SendGrid:Password` out of `appsettings.json`.** Despite the name it is your SendGrid API
-key; put it in user secrets, an environment variable or a key vault.
+**Keep your provider keys out of `appsettings.json`** — `Resend:ApiKey` and `SendGrid:Password`
+both. Put them in user secrets, an environment variable or a key vault. The two are named
+differently because despite its name `SendGrid:Password` *is* an API key, and renaming a
+configuration key would break every existing consumer on upgrade; newer providers use the accurate
+name rather than inheriting the mistake.
 
 ### 4. Register the services
 
@@ -220,10 +230,15 @@ for the actual send.
 | `EmailSwitchSettings:Controls:SessionRetentionDays` | no | `90` | Days a session is kept after it expires, then removed by a TTL index. `0` or less keeps them indefinitely. |
 | `EmailSwitchSettings:SendGrid:From` | if SendGrid used | — | Sender address; also used as reply-to. |
 | `EmailSwitchSettings:SendGrid:Password` | if SendGrid used | — | Your SendGrid **API key**. Keep it in a secret store. |
+| `EmailSwitchSettings:Resend:From` | if Resend used | — | Sender address; also used as reply-to. Must be on a domain verified in Resend, or delivery is limited to your own account address. |
+| `EmailSwitchSettings:Resend:ApiKey` | if Resend used | — | Your Resend API key (`re_…`). Keep it in a secret store. Named `ApiKey`, not `Password` — see above. |
+
+Resend is reached over plain HTTPS with no SDK, so it adds no package dependency to your app. The
+request times out after 10 seconds, because a send sits on the login path with a user waiting on it.
 
 ## Local testing without sending real email
 
-For local development you can route messages to the `DevConsole` provider instead of SendGrid, so
+For local development you can route messages to the `DevConsole` provider instead of a real one, so
 no mail is sent and no credentials are needed. The rendered email — including the verification
 code — is written to the log, and because codes are generated and verified through
 MongoDbTokenManager in your own MongoDB instance, the full `SendOTP` → `VerifyOTP` flow works end to
@@ -241,8 +256,8 @@ Put this in your `appsettings.Development.json`:
 }
 ```
 
-With `DevConsole` as the only provider you can leave the `EmailSwitchSettings:SendGrid` section out
-entirely — nothing constructs the SendGrid client unless SendGrid is actually used.
+With `DevConsole` as the only provider you can leave every other provider section out entirely —
+nothing constructs a provider unless it is actually named in `Priority` and resolved.
 
 As a safety measure the `DevConsole` provider refuses to operate when the app runs in the
 `Production` environment: it logs a critical error and reports the send as failed, so the provider
@@ -262,15 +277,46 @@ queue falls through to a real provider if one is configured after it.
   default) governs how long they survive past expiry. Sessions hold the verified email address, so
   set this to whatever your retention policy allows rather than leaving it unbounded. Note a TTL
   index gives time-based expiry, not erasure of one person's data on request.
-- **The code is not kept.** MongoDbTokenManager stores only a hash of it, and the rendered email that
-  contains it in cleartext is dropped as soon as it can no longer be needed — on verification, or
-  once the send budget is spent. It is still readable in the sessions collection for the few minutes
-  in between, so treat that collection as holding secrets even though nothing retains them.
+- **The code is not kept — in *your* storage.** MongoDbTokenManager stores only a hash of it, and the
+  rendered email that contains it in cleartext is dropped as soon as it can no longer be needed — on
+  verification, or once the send budget is spent. It is still readable in the sessions collection for
+  the few minutes in between, so treat that collection as holding secrets even though nothing retains
+  them. This guarantee stops at your infrastructure: whichever provider you route through is handed
+  the rendered email, code included, and retains it on its own schedule and in its own dashboard.
+  That is true of SendGrid and Resend alike, and it is not something EmailSwitch can shorten.
 - **Read the code off the log, not the database,** if you are scripting against `DevConsole`. It is
   no longer recoverable from the stored session once the budget is spent, which with a single
   provider is immediately after the first send.
 - **The logo endpoint is public** and keyed by session id, so a request to it reveals that a session
   exists. It also records each render, which doubles as an open-tracking signal.
+
+### If you use Resend
+
+An OTP path is not a newsletter: a provider limit that would be a minor annoyance elsewhere locks
+people out of their accounts here. These are the ones worth knowing before you point `Priority` at
+Resend. All of them were checked against Resend's own documentation on 10-08-2026 — verify them
+against the current docs rather than trusting this list.
+
+- **The free tier caps you at 100 emails/day and 3,000/month, on one verified domain.** Past the cap
+  Resend answers `429`, EmailSwitch reports `IsSent = false`, and nobody can log in until the day
+  rolls over. ([quotas and limits](https://resend.com/docs/knowledge-base/account-quotas-and-limits))
+- **The rate limit is 10 requests/second per team, shared across every API key** — not per key. A
+  burst of logins, or another service on the same team, can push the OTP path into `429`.
+- **An unverified domain works in development and fails in production.** Until you verify a domain
+  you can only send from `onboarding@resend.dev`, and only to your own account's address. Every other
+  recipient gets a `403`, which EmailSwitch logs with the response body.
+  ([403 on resend.dev](https://resend.com/docs/knowledge-base/403-error-resend-dev-domain))
+- **Region selection is about where mail is sent *from*, not where data lives.** Resend can dispatch
+  from `us-east-1`, `eu-west-1` or `sa-east-1`, but its documentation states that account data, email
+  metadata and logs are stored in the United States regardless. Resend publishes a DPA, states GDPR
+  compliance and holds an EU-US Data Privacy Framework certification; if you are transferring
+  personal data out of the EU, read those and the current subprocessor list yourself rather than
+  taking this paragraph as a compliance assessment.
+  ([choosing a region](https://resend.com/docs/dashboard/domains/regions),
+  [DPA](https://resend.com/legal/dpa))
+- **Failover is your mitigation for all of the above.** With `"Priority": [ "Resend", "SendGrid" ]`
+  a `429` or `403` from Resend falls through to the next provider within the same send budget, and
+  the recipient still gets the code they asked for.
 
 ## Contributing
 

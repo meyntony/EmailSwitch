@@ -8,6 +8,7 @@
 	public enum EmailProvider
 	{
 		SendGrid = 0,
-		DevConsole = 1
+		DevConsole = 1,
+		Resend = 2
 	}
 }
