@@ -278,6 +278,17 @@ namespace EmailSwitch.Tests
 			Assert.Equal([EmailProvider.Resend], initializer.EmailControls.Priority);
 		}
 
+		[Theory]
+		[InlineData("Brevo")]
+		[InlineData("brevo")]
+		[InlineData("BREVO")]
+		public void Brevo_is_matched_case_insensitively(string configuredProvider)
+		{
+			var initializer = Create(priority: [configuredProvider]);
+
+			Assert.Equal([EmailProvider.Brevo], initializer.EmailControls.Priority);
+		}
+
 		/// <summary>
 		/// Enum.TryParse would read "0" as the first provider. A configuration file never means that,
 		/// and silently honouring it would hide a genuine typo.

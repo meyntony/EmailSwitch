@@ -71,6 +71,24 @@ namespace EmailSwitch.Tests
 				queue);
 		}
 
+		/// <summary>
+		/// Three providers, two rounds: six slots, and the list order holds across the repeat rather
+		/// than draining one provider before moving on.
+		/// </summary>
+		[Fact]
+		public void A_three_provider_budget_repeats_in_order()
+		{
+			var queue = EmailSwitchService.BuildProviderQueue(
+				Controls(2, [EmailProvider.Brevo, EmailProvider.Resend, EmailProvider.SendGrid]));
+
+			Assert.Equal(
+				[
+					EmailProvider.Brevo, EmailProvider.Resend, EmailProvider.SendGrid,
+					EmailProvider.Brevo, EmailProvider.Resend, EmailProvider.SendGrid
+				],
+				queue);
+		}
+
 		[Fact]
 		public void The_head_of_a_resend_first_budget_is_resend()
 		{

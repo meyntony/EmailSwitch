@@ -1,4 +1,5 @@
-﻿using EmailSwitch.Services.Resend;
+﻿using EmailSwitch.Services.Brevo;
+using EmailSwitch.Services.Resend;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
@@ -54,6 +55,13 @@ namespace EmailSwitch.Tests
 			return settings;
 		}
 
+		internal static Dictionary<string, string?> WithBrevo(this Dictionary<string, string?> settings)
+		{
+			settings["EmailSwitchSettings:Brevo:From"] = "noreply@example.com";
+			settings["EmailSwitchSettings:Brevo:ApiKey"] = "xkeysib-fake-api-key";
+			return settings;
+		}
+
 		internal static Dictionary<string, string?> WithPriority(this Dictionary<string, string?> settings, params string[] providers)
 		{
 			for (var index = 0; index < providers.Length; index++)
@@ -67,7 +75,8 @@ namespace EmailSwitch.Tests
 			Dictionary<string, string?> settings,
 			string environmentName = "Development",
 			ILoggerProvider? loggerProvider = null,
-			HttpMessageHandler? resendHandler = null)
+			HttpMessageHandler? resendHandler = null,
+			HttpMessageHandler? brevoHandler = null)
 		{
 			var configuration = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
 
@@ -87,6 +96,12 @@ namespace EmailSwitch.Tests
 			{
 				services.AddHttpClient(ResendInitializer.HttpClientName)
 					.ConfigurePrimaryHttpMessageHandler(() => resendHandler);
+			}
+
+			if (brevoHandler is not null)
+			{
+				services.AddHttpClient(BrevoInitializer.HttpClientName)
+					.ConfigurePrimaryHttpMessageHandler(() => brevoHandler);
 			}
 
 			return services.BuildServiceProvider();
