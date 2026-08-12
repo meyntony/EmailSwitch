@@ -65,7 +65,7 @@ namespace EmailSwitch.Services.Resend
 					_logger.LogError(
 						"Resend rejected the OTP email with {StatusCode}. Response body: {ResendResponseBody}",
 						sendEmailResponse.StatusCode,
-						await ReadBodyForLogging(sendEmailResponse));
+						await HttpResponseLogging.ReadBodyForLogging(sendEmailResponse));
 				}
 
 				return new EmailSwitchResponseSendOTP()
@@ -84,22 +84,6 @@ namespace EmailSwitch.Services.Resend
 				IsSent = false,
 				OtpLength = otpLength
 			};
-		}
-
-		/// <summary>
-		/// Diagnostics only, so a body that cannot be read must not turn a failed send into a thrown
-		/// one - the caller is already on its unhappy path.
-		/// </summary>
-		private static async Task<string> ReadBodyForLogging(HttpResponseMessage response)
-		{
-			try
-			{
-				return await response.Content.ReadAsStringAsync();
-			}
-			catch (Exception)
-			{
-				return "<could not be read>";
-			}
 		}
 
 		/// <summary>

@@ -1,5 +1,6 @@
 ﻿using EmailSwitch.Common;
 using EmailSwitch.Database;
+using EmailSwitch.Services.Brevo;
 using EmailSwitch.Services.DevConsole;
 using EmailSwitch.Services.Resend;
 using EmailSwitch.Services.SendGrid;
@@ -44,6 +45,14 @@ namespace EmailSwitch
 			services.AddSingleton<ResendInitializer>();
 			services.AddScoped<ResendService>();
 
+			services.AddHttpClient(BrevoInitializer.HttpClientName, httpClient =>
+			{
+				httpClient.BaseAddress = BrevoInitializer.BaseAddress;
+				httpClient.Timeout = BrevoInitializer.Timeout;
+			});
+			services.AddSingleton<BrevoInitializer>();
+			services.AddScoped<BrevoService>();
+
 			// Keyed by provider so EmailSwitchService can resolve one by EmailProvider instead of
 			// switching on it. The factories resolve the concrete registrations above, so there is
 			// still one instance of each per scope and anything injecting SendGridService directly
@@ -51,6 +60,7 @@ namespace EmailSwitch
 			services.AddKeyedScoped<IServiceEmails>(EmailProvider.SendGrid, (serviceProvider, _) => serviceProvider.GetRequiredService<SendGridService>());
 			services.AddKeyedScoped<IServiceEmails>(EmailProvider.DevConsole, (serviceProvider, _) => serviceProvider.GetRequiredService<DevConsoleService>());
 			services.AddKeyedScoped<IServiceEmails>(EmailProvider.Resend, (serviceProvider, _) => serviceProvider.GetRequiredService<ResendService>());
+			services.AddKeyedScoped<IServiceEmails>(EmailProvider.Brevo, (serviceProvider, _) => serviceProvider.GetRequiredService<BrevoService>());
 
 			services.AddScoped<EmailSwitchService>();
 		}

@@ -17,7 +17,7 @@ infrastructure.
   through to the next
 - **`DevConsole` provider for local testing** — writes the verification email to the log instead of
   sending it, so no credentials are needed ([see below](#local-testing-without-sending-real-email))
-- **Covers SendGrid and Resend** as real providers (more can be added)
+- **Covers SendGrid, Resend and Brevo** as real providers (more can be added)
 - **Audit trail in your own MongoDB** — every session, send attempt, failed verification and logo
   render is recorded
 
@@ -60,7 +60,7 @@ dotnet add package EmailSwitch
 | .NET 10.0 | The package targets `net10.0`. |
 | An ASP.NET Core host | EmailSwitch maps its own minimal-API endpoint for the email signature logo, so it references the ASP.NET Core shared framework. |
 | MongoDB | Sessions and tokens are stored in your instance. MongoDbTokenManager creates a TTL index to clean up expired tokens. |
-| A SendGrid or Resend account | Only for real sending — not needed if you use the `DevConsole` provider. Both need a verified sending domain before they will deliver to anyone; see [Worth knowing](#worth-knowing). |
+| A SendGrid, Resend or Brevo account | Only for real sending — not needed if you use the `DevConsole` provider. All three need a verified sender or domain before they will deliver to anyone, and their free tiers each carry a limit that matters on an OTP path; see [Worth knowing](#worth-knowing). |
 
 ### 3. Configure
 
@@ -89,6 +89,10 @@ misbehaving later, so a missing key is reported clearly.
     "Resend": {
       "From": "noreply@example.com",
       "ApiKey": "re_your-api-key"
+    },
+    "Brevo": {
+      "From": "noreply@example.com",
+      "ApiKey": "xkeysib-your-api-key"
     },
     "SendGrid": {
       "From": "noreply@example.com",
@@ -232,9 +236,12 @@ for the actual send.
 | `EmailSwitchSettings:SendGrid:Password` | if SendGrid used | — | Your SendGrid **API key**. Keep it in a secret store. |
 | `EmailSwitchSettings:Resend:From` | if Resend used | — | Sender address; also used as reply-to. Must be on a domain verified in Resend, or delivery is limited to your own account address. |
 | `EmailSwitchSettings:Resend:ApiKey` | if Resend used | — | Your Resend API key (`re_…`). Keep it in a secret store. Named `ApiKey`, not `Password` — see above. |
+| `EmailSwitchSettings:Brevo:From` | if Brevo used | — | Sender address; also used as reply-to. Must be a verified sender or an authenticated domain in Brevo. |
+| `EmailSwitchSettings:Brevo:ApiKey` | if Brevo used | — | Your Brevo API v3 key (`xkeysib-…`). Keep it in a secret store. |
 
-Resend is reached over plain HTTPS with no SDK, so it adds no package dependency to your app. The
-request times out after 10 seconds, because a send sits on the login path with a user waiting on it.
+Resend and Brevo are both reached over plain HTTPS with no SDK, so neither adds a package dependency
+to your app. Each request times out after 10 seconds, because a send sits on the login path with a
+user waiting on it.
 
 ## Local testing without sending real email
 
@@ -317,6 +324,34 @@ against the current docs rather than trusting this list.
 - **Failover is your mitigation for all of the above.** With `"Priority": [ "Resend", "SendGrid" ]`
   a `429` or `403` from Resend falls through to the next provider within the same send budget, and
   the recipient still gets the code they asked for.
+
+### If you use Brevo
+
+Checked against Brevo's own documentation on 12-08-2026; verify against the current docs rather than
+trusting this list.
+
+- **Do not run OTP on the free plan.** Free-plan Brevo stamps a "Sent with Brevo" sticker into the
+  body of every email it sends. On a verification email that puts third-party branding in front of
+  exactly the users you want to be suspicious of anything unexpected, and it is not something
+  EmailSwitch can strip. Removing it requires a paid plan or a paid add-on — confirm the current
+  terms with Brevo directly.
+  ([free plan limits](https://help.brevo.com/hc/en-us/articles/208580669-FAQs-What-are-the-limits-of-the-Free-plan))
+- **The free plan also caps you at 300 emails/day.** Past it sends fail and nobody can log in.
+- **The rate limit is generous** — roughly 1,000 requests/second on the send endpoint, with
+  `x-sib-ratelimit-limit`, `-remaining` and `-reset` response headers. This is the one place Brevo is
+  clearly better suited to a login path than Resend's 10 requests/second per team.
+  ([rate limits](https://developers.brevo.com/docs/api-limits))
+- **Brevo states that it stores data in the EU** — its processing and database servers on its own
+  hardware and Google Cloud, a GDPR-compliant DPA, and no Standard Contractual Clauses needed for
+  standard deployments. That is a real contrast with Resend, whose account data and logs sit in the
+  United States whichever region you send from, and for an EU deployment it may be the deciding
+  factor between the two. This is Brevo's stated position, not an assessment: read the current DPA
+  and subprocessor list yourself before relying on it.
+  ([data storage location](https://help.brevo.com/hc/en-us/articles/360001005510-Data-storage-location),
+  [DPA](https://www.brevo.com/legal/))
+- **Brevo authenticates with an `api-key` header**, not a bearer token, and answers `201` rather than
+  `200` on a successful send. Both are handled; they are noted only because a proxy or gateway in
+  front of it that normalises either will break sends.
 
 ## Contributing
 

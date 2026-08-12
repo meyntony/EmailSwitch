@@ -38,7 +38,7 @@ expiry, the attempt limits and the audit trail. It is on the authentication path
 correctness matter more than the line count suggests.
 
 Three layers: `EmailSwitchService` (the switchboard) → provider services implementing
-`IServiceEmails` (SendGrid, Resend, DevConsole) → the provider SDK or its HTTP API. Providers are
+`IServiceEmails` (SendGrid, Resend, Brevo, DevConsole) → the provider SDK or its HTTP API. Providers are
 resolved by keyed DI on the `EmailProvider` enum, so adding one is a registration plus an
 implementation, not a new `switch` arm.
 
@@ -147,19 +147,19 @@ collection permanently unindexed.
 logo. **Provider initializers compose it rather than deriving from it** — deriving forced a choice
 between reading the logo from disk twice and forwarding one registration to the other, and the
 forwarding made every consumer of the general settings depend on SendGrid credentials existing. That
-left no way to run on DevConsole alone. `SendGridInitializer` and `ResendInitializer` both compose.
-Do not reintroduce the inheritance.
+left no way to run on DevConsole alone. Every provider initializer composes. Do not reintroduce the
+inheritance.
 
 Everything fails hard at startup with a named error: missing `SignatureLogoPath`,
 `SessionTimeoutInSeconds` below 30, a `Priority` list with no recognised provider, and — only when
-that provider is actually resolved — SendGrid's `From` or `Password`, or Resend's `From` or `ApiKey`.
-Provider names parse case-insensitively; unrecognised ones are logged and skipped.
+that provider is actually resolved — SendGrid's `From` or `Password`, or Resend's or Brevo's `From`
+or `ApiKey`. Provider names parse case-insensitively; unrecognised ones are logged and skipped.
 
-**The API key is called `Password` on SendGrid and `ApiKey` on Resend, deliberately.** SendGrid's
-name is wrong — it is an API key, not a password — but a configuration key cannot be renamed without
-breaking every existing consumer on upgrade. New providers use the accurate name rather than
-inheriting the mistake, so the inconsistency is load-bearing in both directions and
-`ResendInitializerTests.The_sendgrid_key_name_is_not_accepted_as_an_alias` pins it.
+**The API key is called `Password` on SendGrid and `ApiKey` on everything since, deliberately.**
+SendGrid's name is wrong — it is an API key, not a password — but a configuration key cannot be
+renamed without breaking every existing consumer on upgrade. New providers use the accurate name
+rather than inheriting the mistake, so the inconsistency is load-bearing in both directions and
+`The_sendgrid_key_name_is_not_accepted_as_an_alias` pins it for both Resend and Brevo.
 
 **`Priority` is a `List`, not a `HashSet`, deliberately.** It is the failover order, and `HashSet<T>`
 does not promise enumeration order — it happens to preserve insertion order only while nothing is
@@ -167,9 +167,8 @@ removed, which is an implementation detail rather than something to route email 
 collapsed explicitly in `GetPriority`, keeping the first position, so naming a provider twice does
 not silently double its share of the send budget.
 
-Nothing may take a hard dependency on `SendGridInitializer` or `ResendInitializer`, or a
-credential-free DevConsole run breaks. Providers are only constructed when resolved through the keyed
-lookup.
+Nothing may take a hard dependency on any provider initializer, or a credential-free DevConsole run
+breaks. Providers are only constructed when resolved through the keyed lookup.
 
 **Resend is reached over a typed `HttpClient`, not the `Resend` NuGet SDK.** The SDK is Resend's own
 officially maintained one — `github.com/resend/resend-dotnet`, listed on their Official SDKs page —
@@ -192,6 +191,25 @@ Two consequences of that in `Services/Resend`:
 - **No `Idempotency-Key` header.** Resend deduplicates on it for 24 hours and returns the original id
   without sending anything. A resend here is *meant* to deliver the same code again, so a stable
   per-session key would report success while nothing left Resend.
+
+**Brevo is the same shape and was rejected on the same grounds, harder.** `brevo_csharp` is
+Swagger-generated, targets `netstandard2.0`, and pulls **five** packages — including
+`FubarCoder.RestSharp.Portable`, a long-dormant fork of a fork of RestSharp, and `Newtonsoft.Json` on
+a `net10.0` library that has `System.Text.Json` in-box. As with Resend, the package sits under the
+vendor's GitHub org while being authored by an individual; provenance is not what decides this,
+dependency weight is. `netstandard2.0` also means no nullable annotations, which under
+`<Nullable>enable</Nullable>` plus `-warnaserror` is a live source of diagnostics at every call site.
+
+Brevo differs from Resend on the wire in two ways worth remembering:
+
+- It authenticates with a custom **`api-key` header**, not `Authorization`, so `BrevoInitializer`
+  carries the raw key rather than an `AuthenticationHeaderValue`. Still applied per request, for the
+  same container-build reason.
+- It answers **`201`** on an immediate send (`202` when scheduled), so the success check must stay
+  `IsSuccessStatusCode`. An equality test against `200` would report every successful send as failed.
+
+`ReadBodyForLogging` is shared by both in `Common/HttpResponseLogging`. SendGrid keeps its own copy
+because its SDK hands back a different response type.
 
 Required config the library does not own: `MongoDbSettings:ConnectionString`, `Settings:BaseUrl` and
 `Settings:FrontendUrl` all throw if absent. The host must also call `AddMongoDbServices()` and
@@ -222,10 +240,15 @@ mis-keyed registrations. Prefer it over hand-assembling an object graph. MongoDB
 a real connection string is passed — the driver connects lazily, so services resolve against an
 unreachable server.
 
-`TestHost.Build`'s `resendHandler` parameter layers a stub `HttpMessageHandler` onto the named Resend
-client *after* `AddEmailSwitchServices()` has registered it, rather than replacing the registration.
-That keeps a send test on the real client — base address, timeout and all — and substitutes only the
-socket, so `ResendTests` needs neither a network nor a credential.
+`TestHost.Build`'s `resendHandler` and `brevoHandler` parameters layer a stub `HttpMessageHandler`
+onto the named client *after* `AddEmailSwitchServices()` has registered it, rather than replacing the
+registration. That keeps a send test on the real client — base address, timeout and all — and
+substitutes only the socket, so `ResendTests` and `BrevoTests` need neither a network nor a
+credential. At a fourth HTTP provider these are worth collapsing into a name/handler pair.
+
+`EmailProviderTests.Brevo_is_appended_at_the_next_free_value` asserts the **member count** as well as
+the new value. It is meant to fail when a provider is added, forcing the append-versus-insert question
+to be answered deliberately; update the count rather than relaxing the assertion.
 
 `InitializerTests` uses **`"Mailgun"` and `"Postmark"`** as its stand-in unrecognised provider names
 (`Unknown_provider_names_are_ignored`, `A_priority_list_with_no_recognised_provider_is_rejected`).
