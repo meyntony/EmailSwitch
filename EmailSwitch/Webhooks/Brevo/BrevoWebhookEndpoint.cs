@@ -80,14 +80,23 @@ namespace EmailSwitch.Webhooks.Brevo
 		/// <summary>
 		/// Fixed-time, so the endpoint does not leak the configured token one character at a time to
 		/// anyone willing to measure the response.
+		///
+		/// Internal rather than private so it can be tested directly. This is the only thing standing
+		/// between an unsigned Brevo webhook and an endpoint that can send email, which is too much to
+		/// leave verified by reading alone.
 		/// </summary>
-		private static bool TokenMatches(string? configuredToken, string suppliedToken)
+		internal static bool TokenMatches(string? configuredToken, string? suppliedToken)
 		{
-			if (string.IsNullOrWhiteSpace(configuredToken))
+			// A blank configured token never matches, including against a blank supplied one. Mapping is
+			// supposed to have failed at startup before this is reachable; if that guard is ever lost,
+			// the endpoint must refuse everything rather than accept everything.
+			if (string.IsNullOrWhiteSpace(configuredToken) || string.IsNullOrEmpty(suppliedToken))
 			{
 				return false;
 			}
 
+			// FixedTimeEquals returns false for differing lengths rather than throwing. Length is not
+			// the secret here - the contents are - so short-circuiting on it is fine.
 			return CryptographicOperations.FixedTimeEquals(
 				Encoding.UTF8.GetBytes(configuredToken),
 				Encoding.UTF8.GetBytes(suppliedToken));
