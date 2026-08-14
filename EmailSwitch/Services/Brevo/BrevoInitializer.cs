@@ -43,6 +43,19 @@ namespace EmailSwitch.Services.Brevo
 		/// </summary>
 		internal readonly string ApiKey;
 
+		/// <summary>
+		/// Shared secret carried in the webhook path, or null when none is configured.
+		///
+		/// Brevo does not sign its webhooks - Resend uses Svix HMAC and SendGrid uses ECDSA, but Brevo
+		/// offers only IP allowlisting. An endpoint that can trigger an email send must not be callable
+		/// by anyone who finds the URL, so the token stands in for a signature.
+		///
+		/// Nullable rather than required because the webhook is opt-in: a host that never calls
+		/// <c>AddEmailSwitchWebhookEndpoints()</c> has no reason to configure one. That call is what
+		/// fails when it is missing.
+		/// </summary>
+		internal readonly string? WebhookToken;
+
 		public BrevoInitializer(
 			EmailSwitchGeneralInitializer emailSwitchGeneralInitializer,
 			IHttpClientFactory httpClientFactory,
@@ -80,6 +93,9 @@ namespace EmailSwitch.Services.Brevo
 				}
 			};
 			ApiKey = apiKey;
+
+			var webhookToken = brevoConfig["WebhookToken"];
+			WebhookToken = string.IsNullOrWhiteSpace(webhookToken) ? null : webhookToken;
 
 			logger.LogInformation("Brevo initialised for sender {From}.", from);
 		}

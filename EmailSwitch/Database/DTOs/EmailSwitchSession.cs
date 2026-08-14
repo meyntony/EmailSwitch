@@ -48,6 +48,18 @@ namespace EmailSwitch.Database.DTOs
 		public Queue<EmailProvider>? EmailProvidersQueue { get; set; }
 		public List<AttemptDetailsSendOTP> SentAttempts { get; set; } = [];
 
+		/// <summary>
+		/// Delivery events already acted on, as <c>provider:messageId:event</c>.
+		///
+		/// Webhooks retry, and a duplicate is normal rather than exceptional - so without this a
+		/// redelivered bounce would spend a second budget slot and mail the recipient again. Claimed
+		/// with <c>$addToSet</c> and acted on only when the set actually grew, which makes the check and
+		/// the claim one server-side operation; testing membership on a loaded session and writing
+		/// afterwards is the same check-then-act race the verification cap already had to be rescued
+		/// from.
+		/// </summary>
+		public List<string> HandledDeliveryEventKeys { get; set; } = [];
+
 		[BsonDateTimeOptions(Kind = DateTimeKind.Utc)]
 		public List<DateTime> LogoRenderedAttemptsUTC { get; set; } = [];
 

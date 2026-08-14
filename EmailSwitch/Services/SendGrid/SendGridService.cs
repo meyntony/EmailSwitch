@@ -56,7 +56,10 @@ namespace EmailSwitch.Services.SendGrid
 				return new EmailSwitchResponseSendOTP()
 				{
 					IsSent = sendEmailResponse.IsSuccessStatusCode,
-					OtpLength = otpLength
+					OtpLength = otpLength,
+					ProviderMessageId = sendEmailResponse.IsSuccessStatusCode
+						? ReadMessageId(sendEmailResponse)
+						: null
 				};
 			}
 			catch (Exception exception)
@@ -69,6 +72,26 @@ namespace EmailSwitch.Services.SendGrid
 				IsSent = false,
 				OtpLength = otpLength
 			};
+		}
+
+		/// <summary>
+		/// The id a later delivery webhook is correlated back to this session by. SendGrid reports it in
+		/// the X-Message-Id response header rather than a body, and the event webhook's sg_message_id
+		/// carries it as a prefix followed by a suffix SendGrid appends per recipient - so a lookup has
+		/// to match on the prefix rather than on equality.
+		///
+		/// Never allowed to fail the send: the email has already been accepted by the time this runs.
+		/// </summary>
+		private static string? ReadMessageId(Response response)
+		{
+			if (response.Headers is null || !response.Headers.TryGetValues("X-Message-Id", out var values))
+			{
+				return null;
+			}
+
+			var messageId = values.FirstOrDefault();
+
+			return string.IsNullOrWhiteSpace(messageId) ? null : messageId;
 		}
 
 		/// <summary>

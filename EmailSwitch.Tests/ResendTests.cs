@@ -205,6 +205,22 @@ namespace EmailSwitch.Tests
 
 			Assert.True(response.IsSent);
 			Assert.Equal(6, response.OtpLength);
+			// Correlates a later delivery webhook back to this session. Without it the message cannot
+			// participate in delivery failover.
+			Assert.Equal("49a3999c-0ce1-4ea6-ab68-afcd6dc2e794", response.ProviderMessageId);
+		}
+
+		/// <summary>
+		/// A body that cannot be parsed must not turn an accepted send into a failed one - the email is
+		/// already gone by then, and reporting failure would invite the caller to send a second.
+		/// </summary>
+		[Fact]
+		public async Task An_unreadable_message_id_does_not_fail_the_send()
+		{
+			var response = await Send(new StubHandler(HttpStatusCode.OK, "not json"));
+
+			Assert.True(response.IsSent);
+			Assert.Null(response.ProviderMessageId);
 		}
 
 		/// <summary>

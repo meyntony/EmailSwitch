@@ -4,6 +4,7 @@ using EmailSwitch.Services.Brevo;
 using EmailSwitch.Services.DevConsole;
 using EmailSwitch.Services.Resend;
 using EmailSwitch.Services.SendGrid;
+using EmailSwitch.Webhooks;
 using Microsoft.Extensions.DependencyInjection;
 using uSignIn.CommonSettings;
 
@@ -63,6 +64,11 @@ namespace EmailSwitch
 			services.AddKeyedScoped<IServiceEmails>(EmailProvider.Brevo, (serviceProvider, _) => serviceProvider.GetRequiredService<BrevoService>());
 
 			services.AddScoped<EmailSwitchService>();
+
+			// Registered unconditionally, but only reached through the opt-in webhook endpoints - it
+			// resolves providers through the same keyed lookup, so nothing is constructed until an
+			// event actually arrives.
+			services.AddScoped<DeliveryFailoverService>();
 		}
 	}
 }

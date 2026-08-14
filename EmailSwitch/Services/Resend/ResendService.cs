@@ -71,7 +71,10 @@ namespace EmailSwitch.Services.Resend
 				return new EmailSwitchResponseSendOTP()
 				{
 					IsSent = sendEmailResponse.IsSuccessStatusCode,
-					OtpLength = otpLength
+					OtpLength = otpLength,
+					ProviderMessageId = sendEmailResponse.IsSuccessStatusCode
+						? await ReadMessageId(sendEmailResponse)
+						: null
 				};
 			}
 			catch (Exception exception)
@@ -84,6 +87,33 @@ namespace EmailSwitch.Services.Resend
 				IsSent = false,
 				OtpLength = otpLength
 			};
+		}
+
+		/// <summary>
+		/// The id a later delivery webhook is correlated back to this session by. Never allowed to fail
+		/// the send: the email has already been accepted by the time this runs, so reporting a failure
+		/// because the id could not be read would invite the caller to send a second one. Losing the id
+		/// costs delivery failover for this message, nothing more.
+		/// </summary>
+		private async Task<string?> ReadMessageId(HttpResponseMessage response)
+		{
+			try
+			{
+				var body = await response.Content.ReadFromJsonAsync<ResendSendEmailResponse>();
+
+				return string.IsNullOrWhiteSpace(body?.Id) ? null : body.Id;
+			}
+			catch (Exception exception)
+			{
+				_logger.LogWarning(exception, "Resend accepted the OTP email but its id could not be read; delivery failover cannot cover this message.");
+				return null;
+			}
+		}
+
+		private sealed record ResendSendEmailResponse
+		{
+			[JsonPropertyName("id")]
+			public string? Id { get; init; }
 		}
 
 		/// <summary>

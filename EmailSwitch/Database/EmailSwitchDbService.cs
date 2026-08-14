@@ -87,6 +87,14 @@ namespace EmailSwitch.Database
 					Builders<EmailSwitchSession>.IndexKeys.Ascending(session => session.LiveClaimKey),
 					new CreateIndexOptions { Unique = true, Sparse = true }));
 
+				// Sparse: only attempts that actually recorded a provider id are worth indexing, and
+				// every attempt written before that field existed has none. Single-field, but on a
+				// different key from ExpiryTimeUTC, so FindRetentionIndexName - which requires both
+				// ElementCount == 1 and the ExpiryTimeUTC key - cannot mistake it for the TTL index.
+				await _emailSwitchSessionCollection.Indexes.CreateOneAsync(new CreateIndexModel<EmailSwitchSession>(
+					Builders<EmailSwitchSession>.IndexKeys.Ascending(ProviderMessageIdPath),
+					new CreateIndexOptions { Sparse = true }));
+
 				await EnsureRetentionIndex();
 				_indexReady = true;
 			}
@@ -477,6 +485,65 @@ namespace EmailSwitch.Database
 					// session is finished, and the next send for this address deserves a new one.
 					Builders<EmailSwitchSession>.Update.Unset(session => session.LiveClaimKey)));
 		}
+
+		private static readonly string ProviderMessageIdPath =
+			$"{nameof(EmailSwitchSession.SentAttempts)}.{nameof(AttemptDetailsSendOTP.ProviderMessageId)}";
+
+		/// <summary>
+		/// The live session that produced <paramref name="providerMessageId"/>, or null if there is not
+		/// one.
+		///
+		/// The liveness conditions mirror <see cref="GetLatestSession"/> exactly, for the same reason
+		/// <see cref="ReleaseStaleClaim"/> does: a delivery event must never resurrect a session a
+		/// reader would refuse. A bounce for a session that has since been verified, timed out or been
+		/// superseded has nothing useful to trigger - the code either worked or is already gone.
+		///
+		/// <see cref="EmailSwitchSession.LiveClaimKey"/> is required to still be held, which is the part
+		/// that matters most in practice. If the user gave up and requested a new code, a later bounce
+		/// for the old message must not send that superseded code again: it would no longer verify, and
+		/// the recipient would be looking at two different codes with no way to tell which is current.
+		/// </summary>
+		internal async Task<EmailSwitchSession?> GetLiveSessionByProviderMessageId(string providerMessageId)
+		{
+			await EnsureSessionIndex();
+
+			var candidates = await _emailSwitchSessionCollection
+				.Find(Builders<EmailSwitchSession>.Filter.And(
+					Builders<EmailSwitchSession>.Filter.Eq(ProviderMessageIdPath, providerMessageId),
+					Builders<EmailSwitchSession>.Filter.Eq(session => session.SuccessfullyVerifiedTimestampUTC, null),
+					Builders<EmailSwitchSession>.Filter.Gt(session => session.ExpiryTimeUTC, DateTime.UtcNow),
+					Builders<EmailSwitchSession>.Filter.Exists(session => session.LiveClaimKey, true)))
+				.Limit(MaximumCandidateSessions)
+				.ToListAsync();
+
+			return candidates.FirstOrDefault(session => session.HasNotExpired(_emailSwitchInitializer.EmailControls.MaximumFailedAttemptsToVerify));
+		}
+
+		/// <summary>
+		/// Claims a delivery event for this session, returning true only if it had not already been
+		/// claimed. Webhooks retry, so a redelivered bounce would otherwise spend a second budget slot
+		/// and mail the recipient twice.
+		///
+		/// <c>$addToSet</c> plus the modified count makes testing and claiming one server-side
+		/// operation. Loading the session, checking the list and writing afterwards is check-then-act,
+		/// which is exactly how the verification cap came to admit sixteen concurrent guesses against a
+		/// limit of three.
+		/// </summary>
+		internal async Task<bool> TryClaimDeliveryEvent(string sessionId, string deliveryEventKey)
+		{
+			var result = await _emailSwitchSessionCollection.UpdateOneAsync(
+				Filter(sessionId),
+				Builders<EmailSwitchSession>.Update.AddToSet(session => session.HandledDeliveryEventKeys, deliveryEventKey));
+
+			// $addToSet is itself the test: it modifies nothing when the key is already present, so a
+			// modified count of zero means somebody else claimed this event - or the session is gone.
+			// No accompanying filter, which would only restate what the operator already guarantees.
+			return result.ModifiedCount > 0;
+		}
+
+		/// <summary>Reloads a session by id, however stale the caller's copy has become.</summary>
+		internal async Task<EmailSwitchSession?> GetSession(string sessionId) =>
+			await _emailSwitchSessionCollection.Find(Filter(sessionId)).FirstOrDefaultAsync();
 
 		internal async Task RegisterRenderRequest(string id)
 		{

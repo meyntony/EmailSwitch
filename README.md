@@ -15,8 +15,10 @@ infrastructure.
 - **Send and verify email OTPs** — session lifecycle, expiry and attempt limits handled for you
 - **Provider failover on rejection** — an ordered priority list, retried round-robin, so a provider
   that *rejects* the send — bad key, exhausted quota, malformed request, timeout — falls through to
-  the next. It does **not** cover an email that is accepted and then fails to deliver;
-  [see below](#accepted-is-not-delivered)
+  the next ([accepted is not delivered](#accepted-is-not-delivered))
+- **Delivery failover on bounce** — optional webhooks that re-send the same code through the next
+  provider when one reports the message it accepted will never arrive
+  ([see below](#delivery-failover-webhooks))
 - **`DevConsole` provider for local testing** — writes the verification email to the log instead of
   sending it, so no credentials are needed ([see below](#local-testing-without-sending-real-email))
 - **Covers SendGrid, Resend and Brevo** as real providers (more can be added)
@@ -220,6 +222,9 @@ moment it has to decide, the provider has reported success.
 
 What to do about it:
 
+- **Turn on delivery failover** — [see below](#delivery-failover-webhooks). EmailSwitch can consume
+  the provider's delivery events and re-send the *same* code through the next provider when one
+  reports that a message will never arrive.
 - **Watch your provider's dashboard or event webhooks.** That is the only place a delivery failure
   is visible. A monitor on bounce and block rates is not optional if this is your login path.
 - **Get sender authentication right before going live** — SPF, DKIM and a verified sending domain.
@@ -227,6 +232,79 @@ What to do about it:
   providers report it *only* in the dashboard.
 - **Offer the user a resend.** A live session reuses the same code, so a resend is cheap and is the
   practical remedy when the first email vanishes.
+
+## Delivery failover (webhooks)
+
+Provider failover on rejection happens while `SendOTP` is running. Delivery failover happens
+afterwards, when the provider tells you the message it accepted will never arrive — a hard bounce, a
+blocked recipient, an unauthenticated sender. EmailSwitch receives that event, finds the session that
+produced it, and sends the **same code** through the next provider in the session's budget.
+
+Today this is implemented for **Brevo**. Resend and SendGrid sign their webhooks differently and are
+not wired up yet.
+
+### 1. Configure a token
+
+Brevo does **not** sign its webhooks — Resend uses Svix HMAC and SendGrid uses ECDSA, but Brevo
+offers only IP allowlisting. The endpoint can trigger an email send, so it must not be callable by
+anyone who finds the URL. EmailSwitch requires a shared secret in the path instead:
+
+```json
+{
+  "EmailSwitchSettings": {
+    "Brevo": {
+      "From": "noreply@example.com",
+      "ApiKey": "xkeysib-your-api-key",
+      "WebhookToken": "a-long-random-string-from-a-csprng"
+    }
+  }
+}
+```
+
+Generate it the way you would any secret — at least 32 random characters — and keep it in the same
+store as your API key. The path is compared in fixed time.
+
+### 2. Map the endpoint
+
+```csharp
+app.AddEmailSwitchApiEndpoints();
+app.AddEmailSwitchWebhookEndpoints();   // opt-in; throws if WebhookToken is missing
+```
+
+Separate and opt-in on purpose: upgrading must not give an existing host a public POST endpoint it
+never asked for. Calling it without a `WebhookToken` fails startup rather than mapping something
+unauthenticated.
+
+### 3. Point Brevo at it
+
+Add a transactional webhook in Brevo for **`hardBounce`, `blocked`, `invalid` and `error`**, pointing
+at:
+
+```
+https://api.example.com/emailswitch/webhooks/brevo/<your-WebhookToken>
+```
+
+### What it will and will not do
+
+- **It needs at least two providers in `Priority`.** A single-provider list spends its only slot on
+  the send that just failed, and the rendered email is retired with it — so there is nothing left to
+  resend and nowhere to send it. This is the same condition rejection failover always had.
+- **The resend carries the same code**, because the session and its token are unchanged. A new code
+  would leave two live in the recipient's inbox with no way to tell which one works.
+- **It is late by design.** `SendOTP` has already returned `IsSent = true` and your user has already
+  been told the code is on its way. The second email arrives seconds to minutes later.
+- **It does nothing after the session expires.** A bounce that arrives after `SessionTimeoutInSeconds`
+  is logged and dropped — there is no live code left to deliver.
+- **It does nothing for a session the user has already replaced.** If they gave up and requested a new
+  code, the old session has handed back its claim and a late bounce for it is ignored, rather than
+  putting a superseded code in front of them.
+- **`deferred` and `softBounce` are deliberately not treated as failures.** Brevo retries them
+  itself, so acting on one would deliver a second copy of a code that is still in flight. `spam` is
+  excluded too — the recipient marked a message they *received*.
+- **Redeliveries are safe.** Webhooks retry; each event is claimed server-side exactly once, so a
+  redelivered bounce does not send a second email.
+- **The send budget is still the hard ceiling.** A resend spends a slot, so no volume of events —
+  forged or genuine — can send more than `Priority.Count × MaxRoundRobinAttempts` in total.
 
 ### `VerifyOTP`
 
@@ -265,6 +343,7 @@ for the actual send.
 | `EmailSwitchSettings:Resend:ApiKey` | if Resend used | — | Your Resend API key (`re_…`). Keep it in a secret store. Named `ApiKey`, not `Password` — see above. |
 | `EmailSwitchSettings:Brevo:From` | if Brevo used | — | Sender address; also used as reply-to. Must be a verified sender or an authenticated domain in Brevo. |
 | `EmailSwitchSettings:Brevo:ApiKey` | if Brevo used | — | Your Brevo API v3 key (`xkeysib-…`). Keep it in a secret store. |
+| `EmailSwitchSettings:Brevo:WebhookToken` | if webhooks used | — | Shared secret in the webhook path. Required by `AddEmailSwitchWebhookEndpoints()`, which throws without it. Brevo does not sign its webhooks, so this is the only thing protecting an endpoint that can send email. See [Delivery failover](#delivery-failover-webhooks). |
 
 Resend and Brevo are both reached over plain HTTPS with no SDK, so neither adds a package dependency
 to your app. Each request times out after 10 seconds, because a send sits on the login path with a

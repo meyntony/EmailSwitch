@@ -2,6 +2,7 @@
 using EmailSwitch.Common.DTOs;
 using EmailSwitch.Database;
 using EmailSwitch.Database.DTOs;
+using EmailSwitch.EmailTemplates.DTOs;
 using EmailSwitch.Services.SendGrid;
 using HumanLanguages;
 using Microsoft.Extensions.DependencyInjection;
@@ -96,48 +97,13 @@ namespace EmailSwitch
 					return FailedSend(session.ExpiryTimeUTC);
 				}
 
-				// Accumulated in memory and written once at the end. The session document is never
-				// replaced wholesale, so attempts have to arrive as a $push rather than as a field of
-				// a document read before the provider call.
-				var sentAttempts = new List<AttemptDetailsSendOTP>();
-
-				while (emailProvidersQueue.Any())
-				{
-					var emailProvider = emailProvidersQueue.Peek();
-					responseSendOTP = await ProviderFor(emailProvider).SendOTP(email, session.SendOTPEmail);
-
-					sentAttempts.Add(new AttemptDetailsSendOTP(DateTime.UtcNow, emailProvider, responseSendOTP.IsSent));
-
-					// Every attempt spends one slot, success included, so a caller cannot mail the
-					// same address indefinitely by resending. Only a failure falls through to the
-					// next provider.
-					emailProvidersQueue.Dequeue();
-
-					if (responseSendOTP.IsSent)
-					{
-						break;
-					}
-				}
+				responseSendOTP = await SpendBudget(email, session, emailProvidersQueue, session.SendOTPEmail);
 
 				// The session owns the deadline, and the caller needs it to show a countdown. Without
 				// this the property went back as default(DateTimeOffset) on every successful send.
 				if (responseSendOTP is not null)
 				{
 					responseSendOTP.ExpiryDateTimeOffset = session.ExpiryTimeUTC;
-				}
-
-				try
-				{
-					await _emailSwitchDbService.RegisterSendAttempts(session.SessionId, emailProvidersQueue, sentAttempts);
-				}
-				catch (Exception exception)
-				{
-					// Contained separately, and deliberately does not change IsSent: the email really
-					// did go out, and reporting otherwise would invite the caller to resend and mail
-					// the recipient twice. What is lost is the record of the slot being spent, so the
-					// budget still shows room - which is a distinct failure from being unable to send,
-					// and is worth being able to tell apart in the logs.
-					_logger.LogCritical(exception, "Sent the OTP to {Email} but could not record it against SessionId: {SessionId}; the send budget was not decremented.", email, session.SessionId);
 				}
 
 				if (responseSendOTP == null || !responseSendOTP.IsSent)
@@ -150,6 +116,104 @@ namespace EmailSwitch
 				_logger.LogCritical(exception, "Unable to send OTP to {Email} with SessionId: {SessionId}", email, session?.SessionId);
 			}
 			return responseSendOTP ?? FailedSend(session?.ExpiryTimeUTC);
+		}
+
+		/// <summary>
+		/// Spends slots from <paramref name="emailProvidersQueue"/> until one provider accepts or the
+		/// budget runs out, and records what happened. Shared by the initial send and by the
+		/// delivery-failover resend so there is exactly one place that knows how a slot is spent.
+		///
+		/// Attempts are accumulated in memory and written once at the end. The session document is
+		/// never replaced wholesale, so they have to arrive as a $push rather than as a field of a
+		/// document read before the provider call.
+		/// </summary>
+		private async Task<EmailSwitchResponseSendOTP?> SpendBudget(
+			EmailIdentifier email,
+			EmailSwitchSession session,
+			Queue<EmailProvider> emailProvidersQueue,
+			EmailContent sendOTPEmail)
+		{
+			EmailSwitchResponseSendOTP? responseSendOTP = null;
+			var sentAttempts = new List<AttemptDetailsSendOTP>();
+
+			while (emailProvidersQueue.Count > 0)
+			{
+				var emailProvider = emailProvidersQueue.Peek();
+				responseSendOTP = await ProviderFor(emailProvider).SendOTP(email, sendOTPEmail);
+
+				sentAttempts.Add(new AttemptDetailsSendOTP(
+					DateTime.UtcNow,
+					emailProvider,
+					responseSendOTP.IsSent,
+					responseSendOTP.ProviderMessageId));
+
+				// Every attempt spends one slot, success included, so a caller cannot mail the same
+				// address indefinitely by resending. Only a failure falls through to the next provider.
+				emailProvidersQueue.Dequeue();
+
+				if (responseSendOTP.IsSent)
+				{
+					break;
+				}
+			}
+
+			try
+			{
+				await _emailSwitchDbService.RegisterSendAttempts(session.SessionId, emailProvidersQueue, sentAttempts);
+			}
+			catch (Exception exception)
+			{
+				// Contained separately, and deliberately does not change IsSent: the email really did go
+				// out, and reporting otherwise would invite the caller to resend and mail the recipient
+				// twice. What is lost is the record of the slot being spent, so the budget still shows
+				// room - which is a distinct failure from being unable to send, and is worth being able
+				// to tell apart in the logs.
+				_logger.LogCritical(exception, "Sent the OTP to {Email} but could not record it against SessionId: {SessionId}; the send budget was not decremented.", email, session.SessionId);
+			}
+
+			return responseSendOTP;
+		}
+
+		/// <summary>
+		/// Sends an existing session's already-rendered email through the next provider in its budget,
+		/// after a delivery event reported that a previously accepted message will never arrive.
+		///
+		/// Deliberately reuses the stored body rather than rendering a new one: the recipient must get
+		/// the <em>same</em> code. A new code would leave two live in their inbox with no way to tell
+		/// which the session will accept, and the token behind the session has not changed anyway.
+		///
+		/// Returns whether a provider accepted the resend. False covers the ordinary cases too - a
+		/// budget already spent, and a rendered email already retired, which is what a spent budget
+		/// implies.
+		/// </summary>
+		internal async Task<bool> ResendThroughNextProvider(EmailSwitchSession session)
+		{
+			var emailProvidersQueue = session.EmailProvidersQueue;
+
+			if (emailProvidersQueue is null || emailProvidersQueue.Count == 0)
+			{
+				_logger.LogWarning(
+					"Delivery failure reported for SessionId: {SessionId} but its send budget is spent; no provider left to try.",
+					session.SessionId);
+
+				return false;
+			}
+
+			if (session.SendOTPEmail is null)
+			{
+				// Retired when the budget was spent, so this should not co-occur with slots remaining.
+				// Checked rather than assumed: the field is nullable precisely because the database can
+				// have dropped it.
+				_logger.LogCritical(
+					"Delivery failure reported for SessionId: {SessionId} but no rendered email is left to resend.",
+					session.SessionId);
+
+				return false;
+			}
+
+			var responseSendOTP = await SpendBudget(session.EmailId, session, emailProvidersQueue, session.SendOTPEmail);
+
+			return responseSendOTP?.IsSent == true;
 		}
 
 		/// <summary>
