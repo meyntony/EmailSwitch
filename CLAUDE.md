@@ -64,6 +64,25 @@ This diverges from SMSwitch **on purpose**, and the divergence is the fix for a 
   provider.
 - **An empty queue does not kill the session.** `HasNotExpired` says nothing about the queue.
 
+**Failover covers rejection, not delivery — and this was a real incident, not a hypothetical.** A
+provider service only ever sees the synchronous response, so `IsSuccessStatusCode` is the entire
+signal it has. Every provider here accepts a send and delivers later, which means a message that is
+accepted and then dropped looks identical to one that arrives. Brevo answered `201` for a send from
+an unauthenticated sender, `SendOTP` recorded a success, the budget slot was spent, SendGrid was
+never tried, and the code silently never arrived. Nothing synchronous could have caught it; SendGrid
+publishes a support article on the same behaviour for its own `202`.
+
+Consequences to keep in mind before "fixing" anything here:
+
+- **Do not make a provider service inspect the response body to guess at delivery.** It cannot know.
+  A 2xx is the provider taking responsibility, and that is all `IsSent` has ever claimed.
+- **Resend rejects an unverified sending domain synchronously (`403`), Brevo does not.** So the same
+  misconfiguration fails over on one provider and silently disappears on the other. That difference
+  is documented in the README because it is a setup trap, not a code defect.
+- Closing the gap properly needs provider delivery webhooks feeding a re-send through the next
+  provider, which requires correlating a provider message id back to a session and is a much larger
+  change. It is not something to bolt onto `IServiceEmails`.
+
 SMSwitch does the opposite on both of the last two points — it leaves the successful provider at the
 head (its `VerifyOTP` peeks it to route verification back) and treats an empty queue as expiry. Both
 choices are wrong here: nothing routes by provider, and conflating "out of sends" with "expired" meant
